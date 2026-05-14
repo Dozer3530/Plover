@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/plugins/tsp_route_generator" >
+        <file>icon.png</file>
+    </qresource>
+</RCC>

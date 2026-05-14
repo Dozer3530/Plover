@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.Python
+build/
+dist/
+
+# QGIS / plugin build artifacts
+*.pyc
+help/build/
+i18n/*.qm
+
+# Compiled Qt resources (regenerate from .qrc if needed)
+# resources.py  # uncomment if you regenerate this from resources.qrc
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# OS
+Thumbs.db
+
+# pb_tool output
+zip_build/
