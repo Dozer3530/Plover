@@ -7,7 +7,7 @@ name=TSPRouteGenerator
 qgisMinimumVersion=3.0
 qgisMaximumVersion=4.99
 description=Generates an optimized TSP route within a boundary layer.
-version=2.5
+version=2.6.0
 author=Zachary Komarnisky
 email=zkomarnisky@oldscollege.ca
 

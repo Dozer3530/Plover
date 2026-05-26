@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 from qgis.PyQt import QtWidgets, uic
-from qgis.PyQt.QtWidgets import QDialog, QVBoxLayout, QLabel, QComboBox, QLineEdit, QPushButton, QHBoxLayout, QTextEdit, QProgressBar, QFileDialog, QSlider
+from qgis.PyQt.QtWidgets import QDialog, QVBoxLayout, QLabel, QComboBox, QLineEdit, QPushButton, QHBoxLayout, QTextEdit, QProgressBar, QFileDialog, QSlider, QMessageBox
 from qgis.PyQt.QtCore import Qt
 from qgis.core import (
     QgsVectorLayer,
@@ -11,6 +11,8 @@ from qgis.core import (
     Qgis,
     QgsMessageLog,
     QgsWkbTypes,
+    QgsVectorFileWriter,
+    QgsCoordinateTransformContext,
 )
 import math
 from heapq import heappush, heappop
@@ -112,17 +114,30 @@ class TSPRouteGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         layers = QgsProject.instance().mapLayers().values()
         for layer in layers:
             if isinstance(layer, QgsVectorLayer):
-                if layer.geometryType() == 0:  # Point layer
+                if layer.geometryType() == QgsWkbTypes.PointGeometry:
                     self.poi_combo.addItem(layer.name(), layer)
-                elif layer.geometryType() == 2:  # Polygon layer
+                elif layer.geometryType() == QgsWkbTypes.PolygonGeometry:
                     self.boundary_combo.addItem(layer.name(), layer)
 
     def calculate_distance(self, point1, point2):
         return math.sqrt((point2.x() - point1.x()) ** 2 + (point2.y() - point1.y()) ** 2)
 
     def line_intersects_boundary(self, point1, point2, boundary_geom):
+        """Return True if the segment is NOT entirely inside the polygon-with-holes.
+
+        A segment is valid (returns False) only when it stays within the polygon
+        AND does not pass through any interior ring (hole / slough). Edge-following
+        segments are allowed.
+        """
         line = QgsGeometry.fromPolylineXY([point1, point2])
-        return line.intersects(boundary_geom) and not line.touches(boundary_geom) and not line.within(boundary_geom)
+        # A segment is fully inside the polygon-with-holes iff subtracting the
+        # polygon from the line leaves nothing. This naturally rejects segments
+        # that cross holes, since holes are not part of the polygon's interior.
+        outside = line.difference(boundary_geom)
+        if outside is None or outside.isEmpty():
+            return False
+        # Allow vanishingly small slivers from floating-point noise.
+        return outside.length() > 1e-9
 
     def get_boundary_vertices(self, boundary_geom):
         vertices = []
@@ -334,27 +349,96 @@ class TSPRouteGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             QgsMessageLog.logMessage("No route layer to save. Please generate a route first.", "TSP Route Generator", Qgis.Critical)
             return
 
-        file_path, _ = QFileDialog.getSaveFileName(
+        file_path, selected_filter = QFileDialog.getSaveFileName(
             self,
             "Save Route",
             "",
-            "Shapefile (*.shp);;GeoJSON (*.geojson)"
+            "GeoPackage (*.gpkg);;Shapefile (*.shp);;GeoJSON (*.geojson)"
         )
         if not file_path:
             return
 
-        if file_path.endswith('.shp'):
-            error = self.route_layer.saveAs(file_path, "ESRI Shapefile")
-        elif file_path.endswith('.geojson'):
-            error = self.route_layer.saveAs(file_path, "GeoJSON")
+        # Infer driver from filter selection, fall back to extension
+        if "GeoPackage" in selected_filter:
+            driver = "GPKG"
+            if not file_path.lower().endswith(".gpkg"):
+                file_path += ".gpkg"
+        elif "Shapefile" in selected_filter:
+            driver = "ESRI Shapefile"
+            if not file_path.lower().endswith(".shp"):
+                file_path += ".shp"
+        elif "GeoJSON" in selected_filter:
+            driver = "GeoJSON"
+            if not file_path.lower().endswith(".geojson"):
+                file_path += ".geojson"
         else:
-            QgsMessageLog.logMessage("Unsupported file format. Please use .shp or .geojson.", "TSP Route Generator", Qgis.Critical)
-            return
+            # Fallback: infer from extension
+            ext = file_path.lower()
+            if ext.endswith(".gpkg"):
+                driver = "GPKG"
+            elif ext.endswith(".shp"):
+                driver = "ESRI Shapefile"
+            elif ext.endswith(".geojson"):
+                driver = "GeoJSON"
+            else:
+                QgsMessageLog.logMessage("Unsupported file format. Please use .gpkg, .shp, or .geojson.", "TSP Route Generator", Qgis.Critical)
+                return
 
-        if error:
-            QgsMessageLog.logMessage(f"Failed to save route: {error}. Check file permissions or format compatibility.", "TSP Route Generator", Qgis.Critical)
+        options = QgsVectorFileWriter.SaveVectorOptions()
+        options.driverName = driver
+        options.fileEncoding = "UTF-8"
+        options.layerName = "TSP_Route"
+
+        # GeoPackage-specific: handle existing file / layer conflicts
+        if driver == "GPKG" and os.path.exists(file_path):
+            # Check whether the target file already contains a TSP_Route layer
+            existing = QgsVectorLayer(f"{file_path}|layername=TSP_Route", "probe", "ogr")
+            if existing.isValid():
+                choice = QMessageBox.question(
+                    self,
+                    "Layer already exists",
+                    f"A layer named 'TSP_Route' already exists in:\n{file_path}\n\n"
+                    "Yes = Overwrite the existing layer\n"
+                    "No  = Append as a new layer with a timestamped name\n"
+                    "Cancel = Don't save",
+                    QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel
+                )
+                if choice == QMessageBox.Cancel:
+                    return
+                elif choice == QMessageBox.Yes:
+                    options.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteLayer
+                else:  # No → append with timestamp
+                    from datetime import datetime
+                    options.layerName = "TSP_Route_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+                    options.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteLayer
+            else:
+                # File exists but no TSP_Route layer — append cleanly
+                options.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteLayer
+
+        transform_context = QgsProject.instance().transformContext()
+        result = QgsVectorFileWriter.writeAsVectorFormatV3(
+            self.route_layer,
+            file_path,
+            transform_context,
+            options
+        )
+
+        # writeAsVectorFormatV3 returns (error_code, error_message[, new_file, new_layer])
+        error_code = result[0]
+        error_message = result[1] if len(result) > 1 else ""
+
+        if error_code != QgsVectorFileWriter.NoError:
+            QgsMessageLog.logMessage(
+                f"Failed to save route: {error_message} (code {error_code}). Check file permissions or format compatibility.",
+                "TSP Route Generator",
+                Qgis.Critical
+            )
         else:
-            QgsMessageLog.logMessage(f"Route saved successfully to {file_path}", "TSP Route Generator", Qgis.Info)
+            QgsMessageLog.logMessage(
+                f"Route saved successfully to {file_path} (layer: {options.layerName})",
+                "TSP Route Generator",
+                Qgis.Info
+            )
 
     def update_slider_from_input(self):
         try:
