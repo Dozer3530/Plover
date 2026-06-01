@@ -10,7 +10,7 @@
    </rect>
   </property>
   <property name="windowTitle" >
-   <string>TSPRouteGenerator</string>
+   <string>Plover</string>
   </property>
   <widget class="QDialogButtonBox" name="button_box" >
    <property name="geometry" >

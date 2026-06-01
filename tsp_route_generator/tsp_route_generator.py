@@ -12,7 +12,7 @@ class TSPRouteGenerator:
         self.iface = iface
         self.plugin_dir = None
         self.actions = []
-        self.menu = self.tr(u'&TSP Route Generator')
+        self.menu = self.tr(u'&Plover')
 
     def tr(self, message):
         return QCoreApplication.translate('TSPRouteGenerator', message)
@@ -49,7 +49,7 @@ class TSPRouteGenerator:
         icon_path = ':/plugins/tsp_route_generator/icon.png'
         self.add_action(
             icon_path,
-            text=self.tr(u'Generate TSP Route'),
+            text=self.tr(u'Plover - Generate Route'),
             callback=self.run,
             parent=self.iface.mainWindow())
         self.add_action(
@@ -62,7 +62,7 @@ class TSPRouteGenerator:
 
     def unload(self):
         for action in self.actions:
-            self.iface.removePluginMenu(self.tr(u'&TSP Route Generator'), action)
+            self.iface.removePluginMenu(self.tr(u'&Plover'), action)
             self.iface.removeToolBarIcon(action)
         self.actions = []
 

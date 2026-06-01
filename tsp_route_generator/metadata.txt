@@ -3,18 +3,18 @@
 # This file should be included when you package your plugin.# Mandatory items:
 
 [general]
-name=TSPRouteGenerator
+name=Plover
 qgisMinimumVersion=3.0
 qgisMaximumVersion=4.99
-description=Generates an optimized TSP route within a boundary layer.
+description=Plover - Boundary-aware TSP routing for QGIS.
 version=2.7.0
 author=Zachary Komarnisky
 email=zkomarnisky@oldscollege.ca
 
-about=Generates an optimized TSP route within a boundary layer
+about=Plover generates an optimized TSP (Traveling Salesperson) route through a point layer, constrained to stay within a polygon boundary and to route around interior rings (holes / sloughs / exclusion zones).
 
-tracker=https://github.com/Dozer3530/TSP_QGIS/issues
-repository=https://github.com/Dozer3530/TSP_QGIS
+tracker=https://github.com/Dozer3530/Plover/issues
+repository=https://github.com/Dozer3530/Plover
 # End of mandatory metadata
 
 # Recommended items:
@@ -26,7 +26,7 @@ hasProcessingProvider=no
 # Tags are comma separated with spaces allowed
 tags=tsp, routing, optimization, vector, agriculture, path planning
 
-homepage=https://github.com/Dozer3530/TSP_QGIS
+homepage=https://github.com/Dozer3530/Plover
 category=Plugins
 icon=icon.png
 # experimental flag

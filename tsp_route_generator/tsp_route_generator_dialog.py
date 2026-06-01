@@ -316,7 +316,7 @@ class TSPRouteGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 segment_pts = [all_nodes[i], all_nodes[j]]
                 QgsMessageLog.logMessage(
                     f"No cached path between waypoints {i} and {j}; using direct line.",
-                    "TSP Route Generator", Qgis.Warning
+                    "Plover", Qgis.Warning
                 )
             else:
                 segment_pts = [all_nodes[idx] for idx in path]
@@ -336,7 +336,7 @@ class TSPRouteGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
 
     def save_route(self):
         if not self.route_layer:
-            QgsMessageLog.logMessage("No route layer to save. Please generate a route first.", "TSP Route Generator", Qgis.Critical)
+            QgsMessageLog.logMessage("No route layer to save. Please generate a route first.", "Plover", Qgis.Critical)
             return
 
         file_path, selected_filter = QFileDialog.getSaveFileName(
@@ -371,7 +371,7 @@ class TSPRouteGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             elif ext.endswith(".geojson"):
                 driver = "GeoJSON"
             else:
-                QgsMessageLog.logMessage("Unsupported file format. Please use .gpkg, .shp, or .geojson.", "TSP Route Generator", Qgis.Critical)
+                QgsMessageLog.logMessage("Unsupported file format. Please use .gpkg, .shp, or .geojson.", "Plover", Qgis.Critical)
                 return
 
         options = QgsVectorFileWriter.SaveVectorOptions()
@@ -420,13 +420,13 @@ class TSPRouteGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         if error_code != QgsVectorFileWriter.NoError:
             QgsMessageLog.logMessage(
                 f"Failed to save route: {error_message} (code {error_code}). Check file permissions or format compatibility.",
-                "TSP Route Generator",
+                "Plover",
                 Qgis.Critical
             )
         else:
             QgsMessageLog.logMessage(
                 f"Route saved successfully to {file_path} (layer: {options.layerName})",
-                "TSP Route Generator",
+                "Plover",
                 Qgis.Info
             )
 
@@ -435,7 +435,7 @@ class TSPRouteGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             value = float(self.buffer_input.text()) * 1000
             self.buffer_slider.setValue(int(value))
         except ValueError:
-            QgsMessageLog.logMessage("Error: Buffer distance must be a valid number. Please enter a numeric value.", "TSP Route Generator", Qgis.Warning)
+            QgsMessageLog.logMessage("Error: Buffer distance must be a valid number. Please enter a numeric value.", "Plover", Qgis.Warning)
             self.buffer_input.setText("0.1")  # Reset to default
 
     def update_input_from_slider(self):
@@ -447,19 +447,19 @@ class TSPRouteGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         poi_layer = self.poi_combo.currentData()
         boundary_layer = self.boundary_combo.currentData()
         if not poi_layer or not boundary_layer:
-            QgsMessageLog.logMessage("Error: Please select both a point layer and a boundary layer.", "TSP Route Generator", Qgis.Critical)
+            QgsMessageLog.logMessage("Error: Please select both a point layer and a boundary layer.", "Plover", Qgis.Critical)
             return
 
         try:
             buffer_dist = float(self.buffer_input.text())
             start_index = int(self.start_input.text())
         except ValueError as e:
-            QgsMessageLog.logMessage(f"Error: Invalid input - Buffer distance must be a number, and Start index must be an integer. Details: {str(e)}", "TSP Route Generator", Qgis.Critical)
+            QgsMessageLog.logMessage(f"Error: Invalid input - Buffer distance must be a number, and Start index must be an integer. Details: {str(e)}", "Plover", Qgis.Critical)
             return
 
         # CRS Validation
         if poi_layer.crs() != boundary_layer.crs():
-            QgsMessageLog.logMessage(f"Warning: Layers have different CRS ({poi_layer.crs().authid()} vs {boundary_layer.crs().authid()}). Results may be inaccurate. Consider reprojecting layers to match.", "TSP Route Generator", Qgis.Warning)
+            QgsMessageLog.logMessage(f"Warning: Layers have different CRS ({poi_layer.crs().authid()} vs {boundary_layer.crs().authid()}). Results may be inaccurate. Consider reprojecting layers to match.", "Plover", Qgis.Warning)
             return
 
         # Extract points with geometry type validation and MultiPointZ conversion
@@ -474,21 +474,21 @@ class TSPRouteGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                     # Use the centroid of MultiPointZ as a representative point
                     centroid = QgsGeometry.fromMultiPointXY(multi_points).centroid().asPoint()
                     points.append(centroid)
-                    QgsMessageLog.logMessage(f"Converted MultiPointZ feature at index {feature.id()} to centroid ({centroid.x():.6f}, {centroid.y():.6f}).", "TSP Route Generator", Qgis.Info)
+                    QgsMessageLog.logMessage(f"Converted MultiPointZ feature at index {feature.id()} to centroid ({centroid.x():.6f}, {centroid.y():.6f}).", "Plover", Qgis.Info)
                 else:
-                    QgsMessageLog.logMessage(f"Warning: Skipping empty MultiPointZ feature at index {feature.id()}.", "TSP Route Generator", Qgis.Warning)
+                    QgsMessageLog.logMessage(f"Warning: Skipping empty MultiPointZ feature at index {feature.id()}.", "Plover", Qgis.Warning)
             else:
-                QgsMessageLog.logMessage(f"Warning: Skipping feature with geometry type {geom.typeName()} at index {feature.id()}. Only Point and MultiPoint geometries are supported.", "TSP Route Generator", Qgis.Warning)
+                QgsMessageLog.logMessage(f"Warning: Skipping feature with geometry type {geom.typeName()} at index {feature.id()}. Only Point and MultiPoint geometries are supported.", "Plover", Qgis.Warning)
         if not points:
-            QgsMessageLog.logMessage("Error: No valid point features found in the point layer. Ensure the layer contains Point or MultiPoint geometries.", "TSP Route Generator", Qgis.Critical)
+            QgsMessageLog.logMessage("Error: No valid point features found in the point layer. Ensure the layer contains Point or MultiPoint geometries.", "Plover", Qgis.Critical)
             return
         if start_index < 0 or start_index >= len(points):
-            QgsMessageLog.logMessage(f"Error: Invalid start_point_index {start_index}. Must be between 0 and {len(points) - 1}.", "TSP Route Generator", Qgis.Critical)
+            QgsMessageLog.logMessage(f"Error: Invalid start_point_index {start_index}. Must be between 0 and {len(points) - 1}.", "Plover", Qgis.Critical)
             return
 
         boundary_geom = next(boundary_layer.getFeatures(), None)
         if not boundary_geom or not boundary_geom.geometry().isGeosValid():
-            QgsMessageLog.logMessage("Error: Boundary geometry is invalid or not found. Run 'Fix Geometries' in QGIS or ensure the boundary layer has valid polygon features.", "TSP Route Generator", Qgis.Critical)
+            QgsMessageLog.logMessage("Error: Boundary geometry is invalid or not found. Run 'Fix Geometries' in QGIS or ensure the boundary layer has valid polygon features.", "Plover", Qgis.Critical)
             return
         boundary_geom = boundary_geom.geometry()
 
@@ -501,10 +501,10 @@ class TSPRouteGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
                 invalid_points.append((i, point.x(), point.y(), distance))
 
         if invalid_points:
-            QgsMessageLog.logMessage(f"Warning: Points not within or on the boundary (buffered by {buffer_dist} units):", "TSP Route Generator", Qgis.Warning)
+            QgsMessageLog.logMessage(f"Warning: Points not within or on the boundary (buffered by {buffer_dist} units):", "Plover", Qgis.Warning)
             for idx, x, y, dist in invalid_points:
-                QgsMessageLog.logMessage(f"Point {idx}: ({x:.6f}, {y:.6f}), Distance from boundary: {dist:.6f}", "TSP Route Generator", Qgis.Warning)
-            QgsMessageLog.logMessage("Some points are outside the boundary. Adjust buffer distance or check layer data.", "TSP Route Generator", Qgis.Critical)
+                QgsMessageLog.logMessage(f"Point {idx}: ({x:.6f}, {y:.6f}), Distance from boundary: {dist:.6f}", "Plover", Qgis.Warning)
+            QgsMessageLog.logMessage("Some points are outside the boundary. Adjust buffer distance or check layer data.", "Plover", Qgis.Critical)
             return
 
         boundary_vertices = self.get_boundary_vertices(boundary_geom)
@@ -515,7 +515,7 @@ class TSPRouteGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             if not waypoint_order or len(waypoint_order) < 2:
                 raise ValueError("Could not find a valid route. Check if points are connected within the boundary.")
         except Exception as e:
-            QgsMessageLog.logMessage(f"Error during route calculation: {str(e)}. Ensure all points are within the buffered boundary and the start index is valid.", "TSP Route Generator", Qgis.Critical)
+            QgsMessageLog.logMessage(f"Error during route calculation: {str(e)}. Ensure all points are within the buffered boundary and the start index is valid.", "Plover", Qgis.Critical)
             return
 
         try:
@@ -528,6 +528,6 @@ class TSPRouteGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
             else:
                 total_distance = 0.0
             self.distance_output.setText(f"{total_distance:.2f} units")
-            QgsMessageLog.logMessage(f"TSP route created. Total distance: {total_distance:.2f}", "TSP Route Generator", Qgis.Info)
+            QgsMessageLog.logMessage(f"TSP route created. Total distance: {total_distance:.2f}", "Plover", Qgis.Info)
         except Exception as e:
-            QgsMessageLog.logMessage(f"Error creating route layer: {str(e)}. Check geometry validity or layer CRS.", "TSP Route Generator", Qgis.Critical)
+            QgsMessageLog.logMessage(f"Error creating route layer: {str(e)}. Check geometry validity or layer CRS.", "Plover", Qgis.Critical)
