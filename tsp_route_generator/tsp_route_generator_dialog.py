@@ -201,141 +201,131 @@ class TSPRouteGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
         return path[::-1] if path[-1] == start else []
 
     def find_tsp_route(self, points, boundary_vertices, boundary_geom, buffered_boundary, start_point_index):
+        """Build a waypoint-only TSP order plus cached shortest paths between waypoints.
+
+        Returns:
+            waypoint_order: list of waypoint indices (into `points`), forming the tour
+            paths: dict {(i, j): [node_indices]} giving the visibility-graph shortest
+                   path between every pair of waypoints i and j. Used later to expand
+                   the optimized tour into final geometry.
+            all_nodes: list of QgsPointXY (waypoints first, then boundary vertices)
+        """
         graph, all_nodes = self.build_visibility_graph(points, boundary_vertices, boundary_geom, buffered_boundary)
         n_points = len(points)
+
+        # Step 1: compute shortest path and distance between every pair of waypoints.
+        # The distance matrix is what nearest-neighbour + 2-opt will operate on.
+        # The paths are cached so we can stitch them back together at the end.
+        dist = [[float('inf')] * n_points for _ in range(n_points)]
+        paths = {}
+        for i in range(n_points):
+            dist[i][i] = 0.0
+            for j in range(i + 1, n_points):
+                path = self.dijkstra(graph, i, j, len(all_nodes))
+                if path:
+                    d = sum(self.calculate_distance(all_nodes[path[k]], all_nodes[path[k + 1]])
+                            for k in range(len(path) - 1))
+                    dist[i][j] = d
+                    dist[j][i] = d
+                    paths[(i, j)] = path
+                    paths[(j, i)] = path[::-1]
+
+        # Step 2: nearest-neighbour TSP on the waypoint distance matrix.
         start = start_point_index
-        route = [start]
+        waypoint_order = [start]
         unvisited = set(range(n_points)) - {start}
         current = start
         total_steps = len(unvisited) if unvisited else 1
         step = 0
         while unvisited:
-            min_distance = float('inf')
-            next_node = None
+            nearest = None
+            nearest_d = float('inf')
             for candidate in unvisited:
-                path = self.dijkstra(graph, current, candidate, len(all_nodes))
-                if path:
-                    distance = sum(self.calculate_distance(all_nodes[path[i]], all_nodes[path[i + 1]]) 
-                                 for i in range(len(path) - 1))
-                    if distance < min_distance:
-                        min_distance = distance
-                        next_node = candidate
-                        next_path = path
-            if next_node is None:
+                if dist[current][candidate] < nearest_d:
+                    nearest_d = dist[current][candidate]
+                    nearest = candidate
+            if nearest is None:
+                # No reachable waypoint remaining (visibility graph disconnected)
                 break
-            route.extend(next_path[1:])
-            unvisited.remove(next_node)
-            current = next_node
+            waypoint_order.append(nearest)
+            unvisited.remove(nearest)
+            current = nearest
             step += 1
             progress = 30 + min(int((step / total_steps) * 40), 40)
             self.progress_bar.setValue(progress)
-        return_path = self.dijkstra(graph, current, start, len(all_nodes))
-        if return_path:
-            route.extend(return_path[1:])
-        unique_route = [route[0]]
-        for i in range(1, len(route) - 1):
-            if route[i] != route[i - 1] and route[i] not in unique_route:
-                unique_route.append(route[i])
-        unique_route.append(route[-1])
-        return unique_route, all_nodes
 
-    def two_opt_optimize(self, route, all_nodes, boundary_geom):
-        best_route = route[:]
+        # Close the tour
+        waypoint_order.append(start)
+
+        return waypoint_order, paths, dist, all_nodes
+
+    def two_opt_optimize(self, waypoint_order, dist):
+        """Classic 2-opt on the waypoint distance matrix.
+
+        Operates on the closed tour (start...start). Because `dist[i][j]` is the
+        Dijkstra shortest-path cost through the visibility graph, every reachable
+        pair already routes around obstacles. No per-swap validation is required:
+        any swap that reduces total cost is geometrically valid.
+        """
+        best = waypoint_order[:]
+        n = len(best)
+        if n < 4:  # nothing to optimize on tours of 3 or fewer edges
+            return best
+
         improved = True
         iterations = 0
-        max_iterations = len(route) * (len(route) - 1) // 2 if len(route) > 1 else 1
+        max_iterations = n * (n - 1) // 2
         while improved:
             improved = False
-            for i in range(1, len(best_route) - 2):
-                for j in range(i + 1, len(best_route)):
-                    if j - i == 1:
-                        continue
-                    new_route = best_route[:i] + best_route[i:j][::-1] + best_route[j:]
-                    new_geom = QgsGeometry.fromPolylineXY([all_nodes[point] for point in new_route])
-                    if new_geom.within(boundary_geom):
-                        new_distance = sum(self.calculate_distance(all_nodes[new_route[k]], all_nodes[new_route[k + 1]]) 
-                                         for k in range(len(new_route) - 1))
-                        old_distance = sum(self.calculate_distance(all_nodes[best_route[k]], all_nodes[best_route[k + 1]]) 
-                                         for k in range(len(best_route) - 1))
-                        if new_distance < old_distance:
-                            best_route = new_route
-                            improved = True
+            for i in range(1, n - 2):
+                for j in range(i + 1, n - 1):
+                    a, b = best[i - 1], best[i]
+                    c, d = best[j], best[j + 1]
+                    old = dist[a][b] + dist[c][d]
+                    new = dist[a][c] + dist[b][d]
+                    if new + 1e-9 < old:  # epsilon guards against float-noise infinite loops
+                        best[i:j + 1] = best[i:j + 1][::-1]
+                        improved = True
                     iterations += 1
                     progress = 70 + min(int((iterations / max_iterations) * 30), 30)
                     self.progress_bar.setValue(progress)
-            if not improved:
-                break
-        return best_route
+        return best
 
-    def create_route_layer(self, point_layer, route, all_nodes, boundary_geom):
+    def create_route_layer(self, point_layer, waypoint_order, paths, dist, all_nodes, boundary_geom):
+        """Expand the optimized waypoint order into full geometry using cached paths."""
         crs = point_layer.crs().authid()
         route_layer = QgsVectorLayer(f"LineString?crs={crs}", "TSP_Route_Boundary", "memory")
         provider = route_layer.dataProvider()
         feature = QgsFeature()
 
-        optimized_route = self.two_opt_optimize(route, all_nodes, boundary_geom)
-        route_points = [all_nodes[i] for i in optimized_route]
-        geometry = QgsGeometry.fromPolylineXY(route_points)
+        # Run 2-opt on the closed tour. We pop the trailing start, optimize the
+        # interior, then re-append the start.
+        closed_tour = waypoint_order  # already ends in start
+        optimized_tour = self.two_opt_optimize(closed_tour, dist)
 
-        corrected_points = []
-        boundary_vertices = self.get_boundary_vertices(boundary_geom)
-        boundary_graph = {i: {} for i in range(len(boundary_vertices))}
-        for i in range(len(boundary_vertices)):
-            for j in range(i + 1, len(boundary_vertices)):
-                line = QgsGeometry.fromPolylineXY([boundary_vertices[i], boundary_vertices[j]])
-                if not self.line_intersects_boundary(boundary_vertices[i], boundary_vertices[j], boundary_geom):
-                    distance = self.calculate_distance(boundary_vertices[i], boundary_vertices[j])
-                    boundary_graph[i][j] = distance
-                    boundary_graph[j][i] = distance
-
-        for i in range(len(route_points) - 1):
-            seg = QgsGeometry.fromPolylineXY([route_points[i], route_points[i + 1]])
-            if seg.intersects(boundary_geom) and not seg.within(boundary_geom):
-                try:
-                    intersect_geom = seg.intersection(boundary_geom)
-                    if intersect_geom.type() == QgsWkbTypes.PointGeometry:
-                        intersect_point = intersect_geom.asPoint()
-                    elif intersect_geom.type() == QgsWkbTypes.MultiPointGeometry:
-                        # Use the first point of MultiPointZ if present, log warning
-                        points = intersect_geom.asMultiPoint()
-                        if points:
-                            intersect_point = points[0]
-                            QgsMessageLog.logMessage(f"Warning: MultiPointZ intersection detected at segment {i} to {i+1}. Using first point ({intersect_point.x():.6f}, {intersect_point.y():.6f}). Consider simplifying your point layer.", "TSP Route Generator", Qgis.Warning)
-                        else:
-                            raise ValueError("MultiPointZ intersection has no valid points.")
-                    else:
-                        raise ValueError(f"Unsupported intersection geometry type: {intersect_geom.typeName()} at segment {i} to {i+1}")
-                    
-                    min_dist_start = float('inf')
-                    min_dist_end = float('inf')
-                    nearest_start_idx = None
-                    nearest_end_idx = None
-                    for idx, vertex in enumerate(boundary_vertices):
-                        vert_geom = QgsGeometry.fromPointXY(vertex)
-                        dist_start = vert_geom.distance(QgsGeometry.fromPointXY(route_points[i]))
-                        dist_end = vert_geom.distance(QgsGeometry.fromPointXY(route_points[i + 1]))
-                        if dist_start < min_dist_start:
-                            min_dist_start = dist_start
-                            nearest_start_idx = idx
-                        if dist_end < min_dist_end:
-                            min_dist_end = dist_end
-                            nearest_end_idx = idx
-                    if nearest_start_idx is not None and nearest_end_idx is not None:
-                        path = self.dijkstra(boundary_graph, nearest_start_idx, nearest_end_idx, len(boundary_vertices))
-                        if path:
-                            corrected_points.extend([route_points[i]] + [boundary_vertices[p] for p in path] + [route_points[i + 1]])
-                        else:
-                            corrected_points.extend([route_points[i], route_points[i + 1]])
-                    else:
-                        corrected_points.extend([route_points[i], route_points[i + 1]])
-                except Exception as e:
-                    QgsMessageLog.logMessage(f"Error processing segment {i} to {i+1}: {str(e)}. Skipping correction for this segment.", "TSP Route Generator", Qgis.Critical)
-                    corrected_points.extend([route_points[i], route_points[i + 1]])
+        # Stitch full geometry by concatenating cached Dijkstra paths between
+        # each consecutive pair of waypoints. Skip the first node of each leg
+        # after the first to avoid duplicates.
+        route_points = []
+        for k in range(len(optimized_tour) - 1):
+            i, j = optimized_tour[k], optimized_tour[k + 1]
+            path = paths.get((i, j))
+            if path is None:
+                # Unreachable pair — fall back to a straight line (shouldn't happen
+                # if the visibility graph is connected)
+                segment_pts = [all_nodes[i], all_nodes[j]]
+                QgsMessageLog.logMessage(
+                    f"No cached path between waypoints {i} and {j}; using direct line.",
+                    "TSP Route Generator", Qgis.Warning
+                )
             else:
-                corrected_points.append(route_points[i])
-        corrected_points.append(route_points[-1])
-        geometry = QgsGeometry.fromPolylineXY(corrected_points)
+                segment_pts = [all_nodes[idx] for idx in path]
+            if k == 0:
+                route_points.extend(segment_pts)
+            else:
+                route_points.extend(segment_pts[1:])
 
+        geometry = QgsGeometry.fromPolylineXY(route_points)
         feature.setGeometry(geometry)
         provider.addFeature(feature)
         self.progress_bar.setValue(100)
@@ -519,17 +509,24 @@ class TSPRouteGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
 
         boundary_vertices = self.get_boundary_vertices(boundary_geom)
         try:
-            route, all_nodes = self.find_tsp_route(points, boundary_vertices, boundary_geom, buffered_boundary, start_index)
-            if not route:
+            waypoint_order, paths, dist, all_nodes = self.find_tsp_route(
+                points, boundary_vertices, boundary_geom, buffered_boundary, start_index
+            )
+            if not waypoint_order or len(waypoint_order) < 2:
                 raise ValueError("Could not find a valid route. Check if points are connected within the boundary.")
         except Exception as e:
             QgsMessageLog.logMessage(f"Error during route calculation: {str(e)}. Ensure all points are within the buffered boundary and the start index is valid.", "TSP Route Generator", Qgis.Critical)
             return
 
         try:
-            self.create_route_layer(poi_layer, route, all_nodes, boundary_geom)
-            total_distance = sum(self.calculate_distance(all_nodes[route[i]], all_nodes[route[i + 1]]) 
-                               for i in range(len(route) - 1))
+            self.create_route_layer(poi_layer, waypoint_order, paths, dist, all_nodes, boundary_geom)
+            # Total distance is computed from the optimized tour the route layer
+            # actually used. Re-derive it from the layer's geometry to keep this
+            # accurate regardless of internal changes.
+            if self.route_layer and self.route_layer.featureCount() > 0:
+                total_distance = next(self.route_layer.getFeatures()).geometry().length()
+            else:
+                total_distance = 0.0
             self.distance_output.setText(f"{total_distance:.2f} units")
             QgsMessageLog.logMessage(f"TSP route created. Total distance: {total_distance:.2f}", "TSP Route Generator", Qgis.Info)
         except Exception as e:
