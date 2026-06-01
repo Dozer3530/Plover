@@ -1,4 +1,4 @@
-![Plover](assets/plover.png)
+<div align="center"><img src="assets/plover.png" alt="Plover" width="240"></div>
 
 # Plover
 
