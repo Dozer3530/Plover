@@ -1,48 +1,44 @@
-# This file contains metadata for your plugin.
-
-# This file should be included when you package your plugin.# Mandatory items:
-
 [general]
 name=Plover
-qgisMinimumVersion=3.0
+qgisMinimumVersion=3.22
 qgisMaximumVersion=4.99
-description=Plover - Boundary-aware TSP routing for QGIS.
-version=2.7.0
+supportsQt6=True
+description=Boundary-aware Traveling Salesperson routing: shortest tour through your points, around your sloughs.
+version=3.0.0
 author=Zachary Komarnisky
 email=zkomarnisky@oldscollege.ca
 
-about=Plover generates an optimized TSP (Traveling Salesperson) route through a point layer, constrained to stay within a polygon boundary and to route around interior rings (holes / sloughs / exclusion zones).
+about=Plover generates an optimized TSP (Traveling Salesperson) route through a point layer, constrained to stay within a polygon boundary and to route around interior rings (holes / sloughs / exclusion zones). It builds a visibility graph over the points and the boundary's concave corners, computes obstacle-aware shortest paths between all points, and optimizes the visiting order with multi-start nearest-neighbour, 2-opt and Or-opt. Includes a dialog with live progress (runs in the background, cancellable), a numbered visit-order output layer, GPX/KML export for field navigation, and a Processing algorithm for use in models and batch runs.
 
 tracker=https://github.com/Dozer3530/Plover/issues
 repository=https://github.com/Dozer3530/Plover
-# End of mandatory metadata
 
-# Recommended items:
+hasProcessingProvider=yes
 
-hasProcessingProvider=no
-# Uncomment the following line and add your changelog:
-# changelog=
+changelog=3.0.0
+      - Routing now runs in a background task: QGIS stays responsive, runs are cancellable
+      - New Processing algorithm (Toolbox / Model Designer / batch): plover:tsproute
+      - Buffer now genuinely allows edge-hugging paths; points on the field edge no longer become unreachable
+      - Visibility graph reduced to concave/turn vertices and built with prepared geometries (large speed-up)
+      - One Dijkstra per waypoint instead of per pair (large speed-up on many points)
+      - Better tours: multi-start nearest-neighbour + 2-opt + Or-opt
+      - Optional one-way routes (uncheck "Return to start")
+      - New numbered visit-order output layer with labels; route styled with direction arrows
+      - GPX and KML export (auto-reprojected to WGS84) for field navigation
+      - Boundary layers may have multiple features; fully-enclosed features become exclusion zones
+      - Points are auto-reprojected to the boundary CRS; clear errors for geographic CRS
+      - Layer dropdowns now track project layers; start point chosen with a feature picker
+      - Unreachable points are reported by number instead of silently straight-lined
+      2.7.0
+      - Waypoint-only optimization with cached Dijkstra paths
+      2.6.0
+      - Slough (interior ring) fixes and GeoPackage export
 
-# Tags are comma separated with spaces allowed
-tags=tsp, routing, optimization, vector, agriculture, path planning
+tags=tsp, routing, optimization, vector, agriculture, path planning, field work, visibility graph, processing
 
 homepage=https://github.com/Dozer3530/Plover
-category=Plugins
+category=Vector
 icon=icon.png
-# experimental flag
 experimental=False
-
-# deprecated flag (applies to the whole plugin, not just a single version)
 deprecated=False
-
-# Since QGIS 3.8, a comma separated list of plugins to be installed
-# (or upgraded) can be specified.
-# Check the documentation for more information.
-# plugin_dependencies=
-
-Category of the plugin: Raster, Vector, Database or Web
-# category=
-
-# If the plugin can run on QGIS Server.
 server=False
-

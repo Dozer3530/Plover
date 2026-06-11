@@ -1,2 +1,2 @@
-# import qgis libs so that ve set the correct sip api version
-import qgis   # pylint: disable=W0611  # NOQA
+# Tests for Plover. test_tsp_core runs on any Python; the integration tests
+# self-skip unless executed with a QGIS Python (e.g. python-qgis.bat).

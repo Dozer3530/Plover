@@ -1,78 +1,58 @@
 # -*- coding: utf-8 -*-
-from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication
+"""Plover plugin entry point: menu/toolbar wiring and Processing registration."""
+
+import os
+
 from qgis.PyQt.QtGui import QIcon
-from qgis.PyQt.QtWidgets import QAction, QMainWindow
-from qgis.core import QgsProject, Qgis
-import qgis.utils
-# import resources
-from .tsp_route_generator_dialog import TSPRouteGeneratorDialog
+from qgis.PyQt.QtWidgets import QAction
+from qgis.core import QgsApplication
+
 
 class TSPRouteGenerator:
+    """QGIS plugin shell. The class name is kept for plugin identity."""
+
     def __init__(self, iface):
         self.iface = iface
-        self.plugin_dir = None
+        self.plugin_dir = os.path.dirname(__file__)
+        self.menu = "&Plover"
         self.actions = []
-        self.menu = self.tr(u'&Plover')
-
-    def tr(self, message):
-        return QCoreApplication.translate('TSPRouteGenerator', message)
-
-    def add_action(
-        self,
-        icon_path,
-        text,
-        callback,
-        enabled_flag=True,
-        add_to_menu=True,
-        add_to_toolbar=True,
-        status_tip=None,
-        whats_this=None,
-        parent=None):
-        icon = QIcon()
-        action = QAction(icon, text, parent)
-        action.triggered.connect(callback)
-        action.setEnabled(enabled_flag)
-        if status_tip is not None:
-            action.setStatusTip(status_tip)
-        if whats_this is not None:
-            action.setWhatsThis(whats_this)
-        if add_to_toolbar:
-            self.iface.addToolBarIcon(action)
-        if add_to_menu:
-            self.iface.addPluginToMenu(self.menu, action)
-        self.actions.append(action)
-        return action
+        self.dlg = None
+        self.provider = None
 
     def initGui(self):
-        # Clear existing actions to prevent duplicates
-        self.unload()
-        icon_path = ':/plugins/tsp_route_generator/icon.png'
-        self.add_action(
-            icon_path,
-            text=self.tr(u'Plover - Generate Route'),
-            callback=self.run,
-            parent=self.iface.mainWindow())
-        self.add_action(
-            icon_path,
-            text=self.tr(u'Reload Plugin'),
-            callback=self.reload,
-            add_to_toolbar=False,
-            parent=self.iface.mainWindow())
-        self.dlg = TSPRouteGeneratorDialog(self.iface, self.iface.mainWindow())
+        icon = QIcon(os.path.join(self.plugin_dir, "icon.png"))
+        action = QAction(icon, "Plover — Generate TSP Route",
+                         self.iface.mainWindow())
+        action.setStatusTip("Boundary-aware TSP route through a point layer")
+        action.triggered.connect(self.run)
+        self.iface.addToolBarIcon(action)
+        self.iface.addPluginToMenu(self.menu, action)
+        self.actions.append(action)
+        self.initProcessing()
+
+    def initProcessing(self):
+        from .processing_provider import PloverProcessingProvider
+        self.provider = PloverProcessingProvider()
+        QgsApplication.processingRegistry().addProvider(self.provider)
 
     def unload(self):
         for action in self.actions:
-            self.iface.removePluginMenu(self.tr(u'&Plover'), action)
+            self.iface.removePluginMenu(self.menu, action)
             self.iface.removeToolBarIcon(action)
         self.actions = []
+        if self.provider is not None:
+            QgsApplication.processingRegistry().removeProvider(self.provider)
+            self.provider = None
+        if self.dlg is not None:
+            self.dlg.close()
+            self.dlg = None
 
     def run(self):
+        if self.dlg is None:
+            from .tsp_route_generator_dialog import TSPRouteGeneratorDialog
+            self.dlg = TSPRouteGeneratorDialog(self.iface,
+                                               self.iface.mainWindow())
+        # Modeless: the map stays usable while the dialog is open.
         self.dlg.show()
-        result = self.dlg.exec()
-        if result:
-            pass
-
-    def reload(self):
-        qgis.utils.reloadPlugin('tsp_route_generator')
-        self.initGui()  # Reinitialize GUI components
-        self.iface.messageBar().pushMessage("Success", "Plugin reloaded.", level=Qgis.Info)
+        self.dlg.raise_()
+        self.dlg.activateWindow()

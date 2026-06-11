@@ -26,7 +26,9 @@ i18n/*.qm
 # OS
 Thumbs.db
 
-# pb_tool output
-zip_build/
-
+# Release zips (attach to GitHub Releases instead of committing)
 tsp_route_generator-*.zip
+plover-*.zip
+
+# R
+.Rhistory

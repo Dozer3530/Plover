@@ -12,27 +12,30 @@ AI assistance was used to make this plugin possible.
 
 ## Install
 
-Grab the latest `tsp_route_generator-vX.Y.Z.zip` from the [Releases](https://github.com/Dozer3530/Plover/releases) page, then in QGIS:
+Grab the latest `plover-vX.Y.Z.zip` from the [Releases](https://github.com/Dozer3530/Plover/releases) page, then in QGIS:
 
 **Plugins → Manage and Install Plugins → Install from ZIP** → select the file → **Install Plugin**.
 
-Compatible with QGIS 3.x and QGIS 4.x (Qt5 and Qt6).
+Compatible with QGIS 3.22+ and QGIS 4.x (Qt5 and Qt6).
 
 ## What it does
 
 Given a point layer (waypoints) and a polygon boundary, Plover:
 
-1. Builds a visibility graph between waypoints and boundary vertices, respecting interior rings (holes).
-2. Computes shortest paths between every pair of waypoints via Dijkstra.
-3. Runs a nearest-neighbour TSP heuristic followed by 2-opt optimization on the waypoint-only distance matrix.
-4. Stitches the optimized tour back into a continuous polyline using the cached shortest paths.
-5. Adds the route as a new line layer in your QGIS project.
+1. Builds a visibility graph between waypoints and the boundary's *turn vertices* — only concave field corners and hole corners can ever bend a shortest path, so convex corners and straight-line vertices are skipped entirely (a rectangular field contributes zero graph nodes).
+2. Computes obstacle-aware shortest paths between every pair of waypoints — one Dijkstra per waypoint, with GEOS prepared-geometry predicates doing the visibility tests.
+3. Optimizes the visiting order with multi-start nearest-neighbour construction polished by alternating **2-opt** and **Or-opt** local search.
+4. Stitches the optimized order back into a continuous polyline using the cached shortest paths.
+5. Adds the route (styled with direction arrows) plus an optional **numbered visit-order layer** to your project.
+
+Everything runs in a **background task** — QGIS stays responsive and long runs are cancellable.
 
 The output respects:
 
 - The outer field boundary
 - Interior rings (sloughs, rock piles, fenced exclusions modelled as polygon holes)
-- An optional buffer to allow paths to follow the field edge slightly outside the strict boundary
+- Boundary features fully enclosed by another feature (auto-treated as exclusion zones)
+- A buffer tolerance that genuinely lets the route hug the field edge — points sitting exactly on the boundary line are routable
 
 ## Use case
 
@@ -45,23 +48,54 @@ Also useful for:
 - Manual sensor verification routes
 - Any "visit N points in a constrained area" problem
 
-## Usage
+## Usage (dialog)
 
-1. Load a point layer and a polygon boundary layer into your QGIS project. **Both layers must share the same projected CRS** (UTM, NAD83, etc. — not lat/lon).
+1. Load a point layer and a polygon boundary layer. Use a **projected CRS** (UTM, NAD83, …) — Plover refuses geographic CRS and auto-reprojects the points to the boundary CRS if they differ.
 2. Open Plover from the **Plugins** menu or the toolbar icon.
-3. Select the point layer (POI) and boundary layer.
-4. Set a buffer distance in map units (`0.1` is a reasonable default for meters).
-5. Set the start point index (`0` for the first feature).
-6. Click **Run**.
-7. Once the route appears, click **Save Route** to export — defaults to GeoPackage; Shapefile and GeoJSON also available.
+3. Pick the point and boundary layers (the dropdowns track your project automatically).
+4. Optionally tick **Use only selected points**.
+5. Pick the **start point** with the feature picker.
+6. Set the **boundary buffer** (default 0.5 map units) — how far the route may stray outside the strict boundary or into exclusion zones.
+7. Untick **Return to start** if you want a one-way path instead of a round trip.
+8. Click **Run**. Progress is live and the run is cancellable.
+9. **Save Route…** exports to GeoPackage, Shapefile, GeoJSON, **GPX track** or **KML** (GPX/KML are auto-reprojected to WGS84 — load the GPX straight onto a handheld or phone).
 
-Diagnostic output is written to **View → Panels → Log Messages** under the `TSP Route Generator` tab.
+If any points fall outside the buffered boundary, Plover refuses to run, selects the offending features on the layer, and logs their distances (**View → Panels → Log Messages → Plover**). Points unreachable from the start (cut off by a hole or a pinched boundary) are reported by number instead of being silently straight-lined.
+
+## Usage (Processing)
+
+Plover also registers a Processing algorithm — **Processing Toolbox → Plover → Boundary-aware TSP route** (`plover:tsproute`) — so you can use it in the **Model Designer**, **batch mode**, or from PyQGIS:
+
+```python
+import processing
+result = processing.run("plover:tsproute", {
+    "POINTS": points_layer,
+    "BOUNDARY": boundary_layer,
+    "BUFFER": 0.5,
+    "START_INDEX": 0,
+    "ROUND_TRIP": True,
+    "OUTPUT_ROUTE": "memory:route",
+    "OUTPUT_ORDER": "memory:visit_order",
+})
+```
+
+## Performance
+
+v3.0.0 reworked the whole pipeline (reflex-vertex graph reduction, prepared geometries, single-source Dijkstra, Or-opt). On a synthetic 100-point field with an 80-vertex boundary and two sloughs, against v2.7.0:
+
+| | v2.7.0 | v3.0.0 |
+|---|---|---|
+| Wall time | 2.9 s | 0.26 s (**11× faster**) |
+| Tour length | 6749 m | 6405 m (**5% shorter**) |
+
+The advantage grows with point count and boundary complexity — and since v3.0.0 runs in a background task, QGIS no longer freezes either way.
 
 ## Known limitations
 
-- The TSP solver is heuristic (nearest-neighbour + 2-opt), not exact. For large point sets (>50) results are good but not provably optimal.
-- All points must lie within the buffered boundary. If any are outside, Plover will refuse to run and report which ones.
-- Geographic CRS (EPSG:4326 etc.) will produce nonsense distances. Reproject to a projected CRS first.
+- The solver is heuristic (multi-start NN + 2-opt + Or-opt), not exact. Tours are typically within a few percent of optimal but not provably optimal.
+- All points must lie within the buffered boundary; Plover reports offenders rather than guessing.
+- Geographic CRS (EPSG:4326 etc.) is rejected — reproject to a projected CRS first.
+- The route follows straight visibility lines between graph vertices; it does not account for terrain, row direction, or machinery turning radii.
 
 ## Why "Plover"
 
@@ -71,21 +105,43 @@ Piping Plovers are small, endangered shorebirds that nest on Alberta's prairie s
 
 ```
 Plover/
-  assets/
-    plover.png                              # logo
-  tsp_route_generator/                      # QGIS plugin folder (name fixed for QGIS plugin identity)
-    __init__.py
+  assets/                            # logo
+  tsp_route_generator/               # QGIS plugin folder (name fixed for plugin identity)
+    __init__.py                      # classFactory entry point
     metadata.txt
-    tsp_route_generator.py                  # plugin entry, menu / toolbar registration
-    tsp_route_generator_dialog.py           # dialog UI + TSP algorithm
     icon.png
-    ... (Plugin Builder scaffolding: help/, i18n/, test/, scripts/, etc.)
-  README.md
-  LICENSE
-  .gitignore
+    tsp_route_generator.py           # plugin shell: menu/toolbar + Processing registration
+    tsp_route_generator_dialog.py    # dialog UI (UI only — no algorithm code)
+    route_task.py                    # compute_route pipeline + QgsTask wrapper
+    geometry_utils.py                # visibility graph, boundary handling (QGIS API)
+    tsp_core.py                      # pure-Python solver: Dijkstra, NN, 2-opt, Or-opt
+    processing_provider.py           # Processing algorithm (plover:tsproute)
+    test/                            # unit + headless integration tests
+  build_zip.ps1                      # builds the release zip
+  README.md / LICENSE / .gitignore
 ```
 
 The QGIS plugin folder stays named `tsp_route_generator/` because QGIS identifies installed plugins by folder name on disk. Renaming it would orphan existing installs.
+
+## Development
+
+The solver core has no QGIS dependency, so its tests run with any Python:
+
+```powershell
+python -m unittest tsp_route_generator.test.test_tsp_core -v
+```
+
+The integration and dialog tests run headless against the real QGIS API:
+
+```powershell
+& "C:\Program Files\QGIS 4.0.1\bin\python-qgis.bat" -m unittest discover -s tsp_route_generator/test -t . -v
+```
+
+Build a release zip (reads the version from `metadata.txt`):
+
+```powershell
+.\build_zip.ps1
+```
 
 ## License
 

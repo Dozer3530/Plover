@@ -1,533 +1,527 @@
 # -*- coding: utf-8 -*-
-from qgis.PyQt import QtWidgets, uic
-from qgis.PyQt.QtWidgets import QDialog, QVBoxLayout, QLabel, QComboBox, QLineEdit, QPushButton, QHBoxLayout, QTextEdit, QProgressBar, QFileDialog, QSlider, QMessageBox
-from qgis.PyQt.QtCore import Qt
-from qgis.core import (
-    QgsVectorLayer,
-    QgsFeature,
-    QgsGeometry,
-    QgsPointXY,
-    QgsProject,
-    Qgis,
-    QgsMessageLog,
-    QgsWkbTypes,
-    QgsVectorFileWriter,
-    QgsCoordinateTransformContext,
-)
-import math
-from heapq import heappush, heappop
+"""Plover dialog: gather inputs, launch the background route task, build the
+output layers. All heavy lifting lives in route_task / geometry_utils /
+tsp_core — this module is UI only."""
+
 import os
 
-FORM_CLASS, _ = uic.loadUiType(os.path.join(
-    os.path.dirname(__file__), 'tsp_route_generator_dialog_base.ui'))
+from qgis.PyQt.QtWidgets import (
+    QCheckBox,
+    QDialog,
+    QDoubleSpinBox,
+    QFileDialog,
+    QFormLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QVBoxLayout,
+)
+from qgis.core import (
+    Qgis,
+    QgsApplication,
+    QgsCoordinateTransform,
+    QgsCoordinateReferenceSystem,
+    QgsFeature,
+    QgsGeometry,
+    QgsMessageLog,
+    QgsPointXY,
+    QgsProject,
+    QgsSettings,
+    QgsVectorFileWriter,
+    QgsVectorLayer,
+    QgsWkbTypes,
+)
+from qgis.gui import QgsFeaturePickerWidget, QgsMapLayerComboBox
 
-class TSPRouteGeneratorDialog(QtWidgets.QDialog, FORM_CLASS):
+from .geometry_utils import collect_boundary_geometry, points_outside_region
+from .route_task import PloverRouteTask
+
+LOG_TAG = "Plover"
+
+# Enum homes differ between Qt5/QGIS3 and Qt6/QGIS4; resolve once.
+try:
+    _POINT_FILTER = Qgis.LayerFilter.PointLayer
+    _POLY_FILTER = Qgis.LayerFilter.PolygonLayer
+except AttributeError:
+    from qgis.core import QgsMapLayerProxyModel
+    _POINT_FILTER = QgsMapLayerProxyModel.PointLayer
+    _POLY_FILTER = QgsMapLayerProxyModel.PolygonLayer
+
+try:
+    _BTN_YES = QMessageBox.StandardButton.Yes
+    _BTN_NO = QMessageBox.StandardButton.No
+    _BTN_CANCEL = QMessageBox.StandardButton.Cancel
+except AttributeError:
+    _BTN_YES, _BTN_NO, _BTN_CANCEL = QMessageBox.Yes, QMessageBox.No, QMessageBox.Cancel
+
+
+def _log(message, level=Qgis.Info):
+    QgsMessageLog.logMessage(message, LOG_TAG, level)
+
+
+class TSPRouteGeneratorDialog(QDialog):
+    """Modeless dialog driving the Plover routing pipeline."""
+
     def __init__(self, iface=None, parent=None):
-        """Initialize the dialog with an optional QgisInterface for canvas access."""
-        super(TSPRouteGeneratorDialog, self).__init__(parent)
-        self.setupUi(self)
+        super().__init__(parent)
         self.iface = iface
-        self.canvas = iface.mapCanvas() if iface else None
+        self.task = None
+        self.route_layer = None
+        self.order_layer = None
 
-        # Hide default button box
-        try:
-            self.button_box.setVisible(False)
-        except AttributeError:
-            pass
+        self.setWindowTitle("Plover — TSP Route")
+        self.setMinimumWidth(420)
+        self._build_ui()
+        self._restore_settings()
 
-        # Set up layout manually
-        layout = QVBoxLayout()
-        
-        # Point Layer Dropdown
-        poi_layout = QHBoxLayout()
-        poi_layout.addWidget(QLabel("Poi:"))
-        self.poi_combo = QComboBox()
-        poi_layout.addWidget(self.poi_combo)
-        layout.addLayout(poi_layout)
+    # ------------------------------------------------------------------ UI
 
-        # Boundary Layer Dropdown
-        boundary_layout = QHBoxLayout()
-        boundary_layout.addWidget(QLabel("Boundary:"))
-        self.boundary_combo = QComboBox()
-        boundary_layout.addWidget(self.boundary_combo)
-        layout.addLayout(boundary_layout)
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
 
-        # Buffer Distance Input with Slider
-        buffer_layout = QHBoxLayout()
-        buffer_layout.addWidget(QLabel("Buffer Distance:"))
-        self.buffer_input = QLineEdit("0.1")
-        self.buffer_input.setMaximumWidth(60)
-        self.buffer_input.textChanged.connect(self.update_slider_from_input)
-        buffer_layout.addWidget(self.buffer_input)
+        self.poi_combo = QgsMapLayerComboBox()
+        self.poi_combo.setFilters(_POINT_FILTER)
+        form.addRow("Points to visit:", self.poi_combo)
 
-        self.buffer_slider = QSlider(Qt.Orientation.Horizontal)
-        self.buffer_slider.setRange(0, 1000)
-        self.buffer_slider.setValue(100)
-        self.buffer_slider.setTickInterval(100)
-        self.buffer_slider.valueChanged.connect(self.update_input_from_slider)
-        buffer_layout.addWidget(self.buffer_slider)
-        layout.addLayout(buffer_layout)
+        self.selected_only = QCheckBox("Use only selected points")
+        form.addRow("", self.selected_only)
 
-        # Start Point Index Input
-        start_layout = QHBoxLayout()
-        start_layout.addWidget(QLabel("Start Point Index:"))
-        self.start_input = QLineEdit("0")
-        start_layout.addWidget(self.start_input)
-        layout.addLayout(start_layout)
+        self.boundary_combo = QgsMapLayerComboBox()
+        self.boundary_combo.setFilters(_POLY_FILTER)
+        form.addRow("Boundary layer:", self.boundary_combo)
 
-        # Analysis Output
-        analysis_layout = QHBoxLayout()
-        analysis_layout.addWidget(QLabel("Total Distance:"))
-        self.distance_output = QTextEdit()
+        self.start_picker = QgsFeaturePickerWidget()
+        self.start_picker.setShowBrowserButtons(True)
+        form.addRow("Start at point:", self.start_picker)
+        self.poi_combo.layerChanged.connect(self.start_picker.setLayer)
+        if self.poi_combo.currentLayer():
+            self.start_picker.setLayer(self.poi_combo.currentLayer())
+
+        self.buffer_spin = QDoubleSpinBox()
+        self.buffer_spin.setDecimals(2)
+        self.buffer_spin.setRange(0.0, 1e6)
+        self.buffer_spin.setValue(0.5)
+        self.buffer_spin.setSuffix(" map units")
+        self.buffer_spin.setToolTip(
+            "Tolerance around the boundary: the route may pass this far\n"
+            "outside the field edge and this far into exclusion zones."
+        )
+        form.addRow("Boundary buffer:", self.buffer_spin)
+
+        self.round_trip = QCheckBox("Return to start (round trip)")
+        self.round_trip.setChecked(True)
+        form.addRow("", self.round_trip)
+
+        self.make_order_layer = QCheckBox("Also create a numbered visit-order layer")
+        self.make_order_layer.setChecked(True)
+        form.addRow("", self.make_order_layer)
+
+        layout.addLayout(form)
+
+        self.distance_output = QLineEdit()
         self.distance_output.setReadOnly(True)
-        self.distance_output.setFixedHeight(30)
-        analysis_layout.addWidget(self.distance_output)
-        layout.addLayout(analysis_layout)
+        self.distance_output.setPlaceholderText("Route length will appear here")
+        dist_row = QHBoxLayout()
+        dist_row.addWidget(QLabel("Total distance:"))
+        dist_row.addWidget(self.distance_output)
+        layout.addLayout(dist_row)
 
-        # Progress Bar
-        progress_layout = QHBoxLayout()
-        progress_layout.addWidget(QLabel("Progress:"))
         self.progress_bar = QProgressBar()
-        self.progress_bar.setMinimum(0)
-        self.progress_bar.setMaximum(100)
-        progress_layout.addWidget(self.progress_bar)
-        layout.addLayout(progress_layout)
+        self.progress_bar.setRange(0, 100)
+        layout.addWidget(self.progress_bar)
 
-        # Run Button
+        self.status_label = QLabel("Ready.")
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+
+        buttons = QHBoxLayout()
         self.run_button = QPushButton("Run")
         self.run_button.clicked.connect(self.run_tsp)
-        layout.addWidget(self.run_button)
+        buttons.addWidget(self.run_button)
 
-        # Save Route Button
-        self.save_button = QPushButton("Save Route")
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.clicked.connect(self._cancel_task)
+        self.cancel_button.setEnabled(False)
+        buttons.addWidget(self.cancel_button)
+
+        self.save_button = QPushButton("Save Route…")
         self.save_button.clicked.connect(self.save_route)
         self.save_button.setEnabled(False)
-        layout.addWidget(self.save_button)
+        buttons.addWidget(self.save_button)
 
-        self.setLayout(layout)
+        self.close_button = QPushButton("Close")
+        self.close_button.clicked.connect(self.close)
+        buttons.addWidget(self.close_button)
+        layout.addLayout(buttons)
 
-        # Populate layer dropdowns
-        self.populate_layers()
-        self.route_layer = None
+    def _set_status(self, text, error=False):
+        self.status_label.setStyleSheet("color: #c0392b;" if error else "")
+        self.status_label.setText(text)
 
-    def populate_layers(self):
-        layers = QgsProject.instance().mapLayers().values()
-        for layer in layers:
-            if isinstance(layer, QgsVectorLayer):
-                if layer.geometryType() == QgsWkbTypes.PointGeometry:
-                    self.poi_combo.addItem(layer.name(), layer)
-                elif layer.geometryType() == QgsWkbTypes.PolygonGeometry:
-                    self.boundary_combo.addItem(layer.name(), layer)
+    def _set_running(self, running):
+        self.run_button.setEnabled(not running)
+        self.cancel_button.setEnabled(running)
+        for w in (self.poi_combo, self.boundary_combo, self.start_picker,
+                  self.buffer_spin, self.round_trip, self.selected_only,
+                  self.make_order_layer):
+            w.setEnabled(not running)
 
-    def calculate_distance(self, point1, point2):
-        return math.sqrt((point2.x() - point1.x()) ** 2 + (point2.y() - point1.y()) ** 2)
+    # ------------------------------------------------------------ settings
 
-    def line_intersects_boundary(self, point1, point2, boundary_geom):
-        """Return True if the segment is NOT entirely inside the polygon-with-holes.
+    def _restore_settings(self):
+        s = QgsSettings()
+        self.buffer_spin.setValue(float(s.value("plover/buffer", 0.5)))
+        self.round_trip.setChecked(s.value("plover/round_trip", True, type=bool))
+        self.make_order_layer.setChecked(s.value("plover/order_layer", True, type=bool))
 
-        A segment is valid (returns False) only when it stays within the polygon
-        AND does not pass through any interior ring (hole / slough). Edge-following
-        segments are allowed.
-        """
-        line = QgsGeometry.fromPolylineXY([point1, point2])
-        # A segment is fully inside the polygon-with-holes iff subtracting the
-        # polygon from the line leaves nothing. This naturally rejects segments
-        # that cross holes, since holes are not part of the polygon's interior.
-        outside = line.difference(boundary_geom)
-        if outside is None or outside.isEmpty():
-            return False
-        # Allow vanishingly small slivers from floating-point noise.
-        return outside.length() > 1e-9
+    def _save_settings(self):
+        s = QgsSettings()
+        s.setValue("plover/buffer", self.buffer_spin.value())
+        s.setValue("plover/round_trip", self.round_trip.isChecked())
+        s.setValue("plover/order_layer", self.make_order_layer.isChecked())
 
-    def get_boundary_vertices(self, boundary_geom):
-        vertices = []
-        if boundary_geom.isMultipart():
-            polygons = boundary_geom.asMultiPolygon()
-            if polygons:
-                for polygon in polygons:
-                    for ring in polygon:
-                        vertices.extend([QgsPointXY(v) for v in ring[:-1]])
+    # ------------------------------------------------------------- run flow
+
+    def run_tsp(self):
+        self.progress_bar.setValue(0)
+        self.distance_output.clear()
+        self._save_settings()
+
+        poi_layer = self.poi_combo.currentLayer()
+        boundary_layer = self.boundary_combo.currentLayer()
+        if poi_layer is None or boundary_layer is None:
+            self._set_status("Select both a point layer and a boundary layer.", error=True)
+            return
+
+        boundary_crs = boundary_layer.crs()
+        if boundary_crs.isGeographic():
+            self._set_status(
+                "The boundary layer uses a geographic CRS (degrees). Distances "
+                "would be meaningless — reproject both layers to a projected "
+                "CRS (e.g. UTM) first.", error=True)
+            return
+
+        # --- boundary geometry (merge all polygon features) ---
+        geoms = [f.geometry() for f in boundary_layer.getFeatures() if f.hasGeometry()]
+        boundary_geom, notes = collect_boundary_geometry(geoms)
+        for note in notes:
+            _log(note, Qgis.Warning)
+        if boundary_geom is None:
+            self._set_status("The boundary layer contains no usable polygons.", error=True)
+            return
+
+        # --- points (optionally selection only), transformed to boundary CRS ---
+        if self.selected_only.isChecked():
+            features = list(poi_layer.selectedFeatures())
+            if not features:
+                self._set_status("'Use only selected points' is on, but no points are selected.", error=True)
+                return
         else:
-            polygon = boundary_geom.asPolygon()
-            if polygon:
-                for ring in polygon:
-                    vertices.extend([QgsPointXY(v) for v in ring[:-1]])
-        return vertices
+            features = list(poi_layer.getFeatures())
 
-    def build_visibility_graph(self, points, boundary_vertices, boundary_geom, buffered_boundary):
-        all_nodes = points + boundary_vertices
-        n = len(all_nodes)
-        graph = {i: {} for i in range(n)}
-        total_edges = (n * (n - 1)) // 2
-        edges_processed = 0
-        for i in range(n):
-            for j in range(i + 1, n):
-                line = QgsGeometry.fromPolylineXY([all_nodes[i], all_nodes[j]])
-                if not self.line_intersects_boundary(all_nodes[i], all_nodes[j], boundary_geom) and line.within(buffered_boundary):
-                    distance = self.calculate_distance(all_nodes[i], all_nodes[j])
-                    graph[i][j] = distance
-                    graph[j][i] = distance
-                edges_processed += 1
-                progress = min(int((edges_processed / total_edges) * 30), 30) if total_edges > 0 else 0
-                self.progress_bar.setValue(progress)
-        return graph, all_nodes
+        transform = None
+        if poi_layer.crs() != boundary_crs:
+            transform = QgsCoordinateTransform(poi_layer.crs(), boundary_crs,
+                                               QgsProject.instance())
+            _log(f"Reprojecting points from {poi_layer.crs().authid()} "
+                 f"to {boundary_crs.authid()} for routing.")
 
-    def dijkstra(self, graph, start, end, n):
-        distances = {i: float('inf') for i in range(n)}
-        distances[start] = 0
-        previous = {i: None for i in range(n)}
-        pq = [(0, start)]
-        visited = set()
-        while pq:
-            current_distance, current = heappop(pq)
-            if current in visited:
+        points, fids = [], []
+        for feature in features:
+            geom = feature.geometry()
+            if geom is None or geom.isEmpty():
+                _log(f"Skipping feature {feature.id()}: empty geometry.", Qgis.Warning)
                 continue
-            visited.add(current)
-            if current == end:
-                break
-            for neighbor, weight in graph[current].items():
-                if neighbor in visited:
+            if geom.type() != QgsWkbTypes.PointGeometry:
+                _log(f"Skipping feature {feature.id()}: not a point.", Qgis.Warning)
+                continue
+            if geom.isMultipart():
+                point = geom.centroid().asPoint()
+            else:
+                point = geom.asPoint()
+            if transform is not None:
+                try:
+                    point = transform.transform(point)
+                except Exception:  # noqa: BLE001
+                    _log(f"Skipping feature {feature.id()}: reprojection failed.", Qgis.Warning)
                     continue
-                distance = current_distance + weight
-                if distance < distances[neighbor]:
-                    distances[neighbor] = distance
-                    previous[neighbor] = current
-                    heappush(pq, (distance, neighbor))
-        path = []
-        current = end
-        while current is not None:
-            path.append(current)
-            current = previous[current]
-        return path[::-1] if path[-1] == start else []
+            points.append(QgsPointXY(point))
+            fids.append(feature.id())
 
-    def find_tsp_route(self, points, boundary_vertices, boundary_geom, buffered_boundary, start_point_index):
-        """Build a waypoint-only TSP order plus cached shortest paths between waypoints.
+        if len(points) < 2:
+            self._set_status("Need at least two point features to build a route.", error=True)
+            return
 
-        Returns:
-            waypoint_order: list of waypoint indices (into `points`), forming the tour
-            paths: dict {(i, j): [node_indices]} giving the visibility-graph shortest
-                   path between every pair of waypoints i and j. Used later to expand
-                   the optimized tour into final geometry.
-            all_nodes: list of QgsPointXY (waypoints first, then boundary vertices)
-        """
-        graph, all_nodes = self.build_visibility_graph(points, boundary_vertices, boundary_geom, buffered_boundary)
-        n_points = len(points)
+        # --- start point ---
+        start_feature = self.start_picker.feature()
+        if start_feature is not None and start_feature.isValid() and start_feature.id() in fids:
+            start_index = fids.index(start_feature.id())
+        else:
+            start_index = 0
+            if self.selected_only.isChecked():
+                _log("Chosen start point is not in the selection; starting "
+                     "from the first selected point instead.", Qgis.Warning)
 
-        # Step 1: compute shortest path and distance between every pair of waypoints.
-        # The distance matrix is what nearest-neighbour + 2-opt will operate on.
-        # The paths are cached so we can stitch them back together at the end.
-        dist = [[float('inf')] * n_points for _ in range(n_points)]
-        paths = {}
-        for i in range(n_points):
-            dist[i][i] = 0.0
-            for j in range(i + 1, n_points):
-                path = self.dijkstra(graph, i, j, len(all_nodes))
-                if path:
-                    d = sum(self.calculate_distance(all_nodes[path[k]], all_nodes[path[k + 1]])
-                            for k in range(len(path) - 1))
-                    dist[i][j] = d
-                    dist[j][i] = d
-                    paths[(i, j)] = path
-                    paths[(j, i)] = path[::-1]
+        # --- containment validation against the buffered boundary ---
+        buffer_dist = self.buffer_spin.value()
+        region = boundary_geom.buffer(max(buffer_dist, 1e-6), 8)
+        outside = points_outside_region(points, region)
+        if outside:
+            for idx in outside:
+                p = points[idx]
+                d = QgsGeometry.fromPointXY(p).distance(boundary_geom)
+                _log(f"Point fid={fids[idx]} at ({p.x():.2f}, {p.y():.2f}) is "
+                     f"{d:.2f} units outside the boundary.", Qgis.Warning)
+            if not self.selected_only.isChecked():
+                poi_layer.selectByIds([fids[i] for i in outside])
+            self._set_status(
+                f"{len(outside)} point(s) fall outside the buffered boundary "
+                "(now selected on the layer; details in the log). Increase the "
+                "buffer or fix the data.", error=True)
+            return
 
-        # Step 2: nearest-neighbour TSP on the waypoint distance matrix.
-        start = start_point_index
-        waypoint_order = [start]
-        unvisited = set(range(n_points)) - {start}
-        current = start
-        total_steps = len(unvisited) if unvisited else 1
-        step = 0
-        while unvisited:
-            nearest = None
-            nearest_d = float('inf')
-            for candidate in unvisited:
-                if dist[current][candidate] < nearest_d:
-                    nearest_d = dist[current][candidate]
-                    nearest = candidate
-            if nearest is None:
-                # No reachable waypoint remaining (visibility graph disconnected)
-                break
-            waypoint_order.append(nearest)
-            unvisited.remove(nearest)
-            current = nearest
-            step += 1
-            progress = 30 + min(int((step / total_steps) * 40), 40)
-            self.progress_bar.setValue(progress)
+        # --- launch background task ---
+        self._set_running(True)
+        self._set_status(f"Routing {len(points)} points…")
+        self._run_meta = {
+            "poi_layer": poi_layer,
+            "crs_authid": boundary_crs.authid(),
+            "fids": fids,
+            "points": points,
+            "closed": self.round_trip.isChecked(),
+        }
+        task = PloverRouteTask(
+            points, boundary_geom, buffer_dist, start_index,
+            closed=self.round_trip.isChecked(),
+            on_done=self._task_done,
+        )
+        # Capture the task in the closure: self.task is reset to None when the
+        # run finishes, but queued progress signals may still arrive after.
+        task.progressChanged.connect(
+            lambda: self.progress_bar.setValue(int(task.progress())))
+        self.task = task
+        QgsApplication.taskManager().addTask(task)
 
-        # Close the tour
-        waypoint_order.append(start)
+    def _cancel_task(self):
+        if self.task is not None:
+            self.task.cancel()
+            self._set_status("Cancelling…")
 
-        return waypoint_order, paths, dist, all_nodes
+    def _task_done(self, task):
+        """Runs on the main thread once the task finishes (or fails)."""
+        self._set_running(False)
+        if task is not self.task:
+            return  # stale callback from a superseded run
+        self.task = None
 
-    def two_opt_optimize(self, waypoint_order, dist):
-        """Classic 2-opt on the waypoint distance matrix.
+        if task.user_error:
+            self._set_status(task.user_error, error=True)
+            _log(task.user_error, Qgis.Critical)
+            return
+        if task.exception:
+            self._set_status("Routing failed unexpectedly — see the Plover log "
+                             "panel for the full traceback.", error=True)
+            _log(task.exception, Qgis.Critical)
+            return
+        if task.result is None:
+            self._set_status("Cancelled.")
+            self.progress_bar.setValue(0)
+            return
 
-        Operates on the closed tour (start...start). Because `dist[i][j]` is the
-        Dijkstra shortest-path cost through the visibility graph, every reachable
-        pair already routes around obstacles. No per-swap validation is required:
-        any swap that reduces total cost is geometrically valid.
-        """
-        best = waypoint_order[:]
-        n = len(best)
-        if n < 4:  # nothing to optimize on tours of 3 or fewer edges
-            return best
+        result = task.result
+        meta = self._run_meta
+        try:
+            self._build_output_layers(result, meta)
+        except Exception as exc:  # noqa: BLE001
+            self._set_status(f"Route computed but creating layers failed: {exc}", error=True)
+            import traceback
+            _log(traceback.format_exc(), Qgis.Critical)
+            return
 
-        improved = True
-        iterations = 0
-        max_iterations = n * (n - 1) // 2
-        while improved:
-            improved = False
-            for i in range(1, n - 2):
-                for j in range(i + 1, n - 1):
-                    a, b = best[i - 1], best[i]
-                    c, d = best[j], best[j + 1]
-                    old = dist[a][b] + dist[c][d]
-                    new = dist[a][c] + dist[b][d]
-                    if new + 1e-9 < old:  # epsilon guards against float-noise infinite loops
-                        best[i:j + 1] = best[i:j + 1][::-1]
-                        improved = True
-                    iterations += 1
-                    progress = 70 + min(int((iterations / max_iterations) * 30), 30)
-                    self.progress_bar.setValue(progress)
-        return best
+        self.distance_output.setText(f"{result.total_length:,.1f} map units")
+        trip = "round trip" if meta["closed"] else "one-way path"
+        self._set_status(
+            f"Done — {len(result.order)} stops, {result.total_length:,.1f} units "
+            f"({trip}). Visibility graph: {result.node_count} nodes / "
+            f"{result.edge_count} edges.")
+        _log(f"Route created: {len(result.order)} stops, "
+             f"{result.total_length:.2f} units, {trip}.")
+        self.save_button.setEnabled(True)
 
-    def create_route_layer(self, point_layer, waypoint_order, paths, dist, all_nodes, boundary_geom):
-        """Expand the optimized waypoint order into full geometry using cached paths."""
-        crs = point_layer.crs().authid()
-        route_layer = QgsVectorLayer(f"LineString?crs={crs}", "TSP_Route_Boundary", "memory")
-        provider = route_layer.dataProvider()
-        feature = QgsFeature()
+    # ------------------------------------------------------------- outputs
 
-        # Run 2-opt on the closed tour. We pop the trailing start, optimize the
-        # interior, then re-append the start.
-        closed_tour = waypoint_order  # already ends in start
-        optimized_tour = self.two_opt_optimize(closed_tour, dist)
+    def _build_output_layers(self, result, meta):
+        crs = meta["crs_authid"]
+        closed = meta["closed"]
 
-        # Stitch full geometry by concatenating cached Dijkstra paths between
-        # each consecutive pair of waypoints. Skip the first node of each leg
-        # after the first to avoid duplicates.
-        route_points = []
-        for k in range(len(optimized_tour) - 1):
-            i, j = optimized_tour[k], optimized_tour[k + 1]
-            path = paths.get((i, j))
-            if path is None:
-                # Unreachable pair — fall back to a straight line (shouldn't happen
-                # if the visibility graph is connected)
-                segment_pts = [all_nodes[i], all_nodes[j]]
-                QgsMessageLog.logMessage(
-                    f"No cached path between waypoints {i} and {j}; using direct line.",
-                    "Plover", Qgis.Warning
-                )
-            else:
-                segment_pts = [all_nodes[idx] for idx in path]
-            if k == 0:
-                route_points.extend(segment_pts)
-            else:
-                route_points.extend(segment_pts[1:])
-
-        geometry = QgsGeometry.fromPolylineXY(route_points)
-        feature.setGeometry(geometry)
-        provider.addFeature(feature)
-        self.progress_bar.setValue(100)
+        # Field definitions via the memory-provider URI keeps us off the
+        # QgsField/QVariant API, which changed between Qt5 and Qt6.
+        route_layer = QgsVectorLayer(
+            f"LineString?crs={crs}&field=length:double&field=stops:integer"
+            "&field=round_trip:string(3)",
+            "Plover route", "memory")
+        feature = QgsFeature(route_layer.fields())
+        feature.setGeometry(QgsGeometry.fromPolylineXY(result.route_points))
+        feature.setAttributes([
+            float(result.total_length),
+            len(result.order),
+            "yes" if closed else "no",
+        ])
+        route_layer.dataProvider().addFeature(feature)
+        route_layer.updateExtents()
+        self._style_route_layer(route_layer)
         QgsProject.instance().addMapLayer(route_layer)
         self.route_layer = route_layer
-        self.save_button.setEnabled(True)
-        return route_layer
+
+        if self.make_order_layer.isChecked():
+            order_layer = QgsVectorLayer(
+                f"Point?crs={crs}&field=visit_order:integer&field=source_fid:integer&field=leg_length:double",
+                "Plover visit order", "memory")
+            provider = order_layer.dataProvider()
+            features = []
+            for rank, wp_index in enumerate(result.order):
+                f = QgsFeature(order_layer.fields())
+                f.setGeometry(QgsGeometry.fromPointXY(meta["points"][wp_index]))
+                leg = result.leg_lengths[rank] if rank < len(result.leg_lengths) else 0.0
+                f.setAttributes([rank + 1, int(meta["fids"][wp_index]), float(leg)])
+                features.append(f)
+            provider.addFeatures(features)
+            order_layer.updateExtents()
+            self._label_order_layer(order_layer)
+            QgsProject.instance().addMapLayer(order_layer)
+            self.order_layer = order_layer
+
+    def _style_route_layer(self, layer):
+        """Orange line with direction arrows; best-effort across QGIS versions."""
+        try:
+            from qgis.core import QgsLineSymbol, QgsMarkerLineSymbolLayer, QgsMarkerSymbol
+            symbol = QgsLineSymbol.createSimple({
+                "line_color": "#e8590c", "line_width": "0.7"})
+            marker_line = QgsMarkerLineSymbolLayer()
+            try:  # QGIS >= 3.24 flags API; fall back to the legacy setter
+                marker_line.setPlacements(
+                    Qgis.MarkerLinePlacements(Qgis.MarkerLinePlacement.SegmentCenter))
+            except AttributeError:
+                try:
+                    marker_line.setPlacement(Qgis.MarkerLinePlacement.SegmentCenter)
+                except AttributeError:
+                    marker_line.setPlacement(QgsMarkerLineSymbolLayer.CentralPoint)
+            arrow = QgsMarkerSymbol.createSimple({
+                "name": "filled_arrowhead", "color": "#e8590c", "size": "3"})
+            marker_line.setSubSymbol(arrow)
+            symbol.appendSymbolLayer(marker_line)
+            layer.renderer().setSymbol(symbol)
+            layer.triggerRepaint()
+        except Exception:  # noqa: BLE001 — styling is cosmetic, never fatal
+            _log("Could not apply route symbology on this QGIS version; "
+                 "using defaults.", Qgis.Warning)
+
+    def _label_order_layer(self, layer):
+        try:
+            from qgis.core import QgsPalLayerSettings, QgsVectorLayerSimpleLabeling
+            settings = QgsPalLayerSettings()
+            settings.fieldName = "visit_order"
+            labeling = QgsVectorLayerSimpleLabeling(settings)
+            layer.setLabeling(labeling)
+            layer.setLabelsEnabled(True)
+            layer.triggerRepaint()
+        except Exception:  # noqa: BLE001
+            _log("Could not enable visit-order labels on this QGIS version.",
+                 Qgis.Warning)
+
+    # ---------------------------------------------------------------- save
 
     def save_route(self):
         if not self.route_layer:
-            QgsMessageLog.logMessage("No route layer to save. Please generate a route first.", "Plover", Qgis.Critical)
+            self._set_status("No route layer to save — generate a route first.", error=True)
             return
 
+        settings = QgsSettings()
+        last_dir = settings.value("plover/last_save_dir", "")
         file_path, selected_filter = QFileDialog.getSaveFileName(
-            self,
-            "Save Route",
-            "",
-            "GeoPackage (*.gpkg);;Shapefile (*.shp);;GeoJSON (*.geojson)"
-        )
+            self, "Save Route", last_dir,
+            "GeoPackage (*.gpkg);;Shapefile (*.shp);;GeoJSON (*.geojson);;"
+            "GPX track (*.gpx);;KML (*.kml)")
         if not file_path:
             return
+        settings.setValue("plover/last_save_dir", os.path.dirname(file_path))
 
-        # Infer driver from filter selection, fall back to extension
-        if "GeoPackage" in selected_filter:
-            driver = "GPKG"
-            if not file_path.lower().endswith(".gpkg"):
-                file_path += ".gpkg"
-        elif "Shapefile" in selected_filter:
-            driver = "ESRI Shapefile"
-            if not file_path.lower().endswith(".shp"):
-                file_path += ".shp"
-        elif "GeoJSON" in selected_filter:
-            driver = "GeoJSON"
-            if not file_path.lower().endswith(".geojson"):
-                file_path += ".geojson"
-        else:
-            # Fallback: infer from extension
-            ext = file_path.lower()
-            if ext.endswith(".gpkg"):
-                driver = "GPKG"
-            elif ext.endswith(".shp"):
-                driver = "ESRI Shapefile"
-            elif ext.endswith(".geojson"):
-                driver = "GeoJSON"
-            else:
-                QgsMessageLog.logMessage("Unsupported file format. Please use .gpkg, .shp, or .geojson.", "Plover", Qgis.Critical)
-                return
+        drivers = {
+            "GeoPackage": ("GPKG", ".gpkg"),
+            "Shapefile": ("ESRI Shapefile", ".shp"),
+            "GeoJSON": ("GeoJSON", ".geojson"),
+            "GPX": ("GPX", ".gpx"),
+            "KML": ("KML", ".kml"),
+        }
+        driver = None
+        for label, (drv, ext) in drivers.items():
+            if label in selected_filter:
+                driver = drv
+                if not file_path.lower().endswith(ext):
+                    file_path += ext
+                break
+        if driver is None:  # infer from typed extension
+            for drv, ext in drivers.values():
+                if file_path.lower().endswith(ext):
+                    driver = drv
+                    break
+        if driver is None:
+            self._set_status("Unsupported file format — use .gpkg, .shp, "
+                             ".geojson, .gpx or .kml.", error=True)
+            return
 
         options = QgsVectorFileWriter.SaveVectorOptions()
         options.driverName = driver
         options.fileEncoding = "UTF-8"
-        options.layerName = "TSP_Route"
+        options.layerName = "plover_route"
 
-        # GeoPackage-specific: handle existing file / layer conflicts
+        # GPX and KML are WGS84 formats; reproject on the way out.
+        if driver in ("GPX", "KML"):
+            options.ct = QgsCoordinateTransform(
+                self.route_layer.crs(),
+                QgsCoordinateReferenceSystem("EPSG:4326"),
+                QgsProject.instance())
+            if driver == "GPX":
+                options.layerOptions = ["FORCE_GPX_TRACK=YES"]
+                # Dataset-level option: without it the GPX schema rejects our
+                # attribute fields and the write fails outright.
+                options.datasourceOptions = ["GPX_USE_EXTENSIONS=YES"]
+
         if driver == "GPKG" and os.path.exists(file_path):
-            # Check whether the target file already contains a TSP_Route layer
-            existing = QgsVectorLayer(f"{file_path}|layername=TSP_Route", "probe", "ogr")
+            existing = QgsVectorLayer(f"{file_path}|layername=plover_route", "probe", "ogr")
             if existing.isValid():
                 choice = QMessageBox.question(
-                    self,
-                    "Layer already exists",
-                    f"A layer named 'TSP_Route' already exists in:\n{file_path}\n\n"
-                    "Yes = Overwrite the existing layer\n"
-                    "No  = Append as a new layer with a timestamped name\n"
-                    "Cancel = Don't save",
-                    QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel
-                )
-                if choice == QMessageBox.Cancel:
+                    self, "Layer already exists",
+                    f"A layer named 'plover_route' already exists in:\n{file_path}\n\n"
+                    "Yes = overwrite it\nNo = add a timestamped layer\nCancel = don't save",
+                    _BTN_YES | _BTN_NO | _BTN_CANCEL)
+                if choice == _BTN_CANCEL:
                     return
-                elif choice == QMessageBox.Yes:
-                    options.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteLayer
-                else:  # No → append with timestamp
+                if choice == _BTN_NO:
                     from datetime import datetime
-                    options.layerName = "TSP_Route_" + datetime.now().strftime("%Y%m%d_%H%M%S")
-                    options.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteLayer
-            else:
-                # File exists but no TSP_Route layer — append cleanly
-                options.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteLayer
+                    options.layerName = "plover_route_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+            options.actionOnExistingFile = QgsVectorFileWriter.CreateOrOverwriteLayer
 
-        transform_context = QgsProject.instance().transformContext()
         result = QgsVectorFileWriter.writeAsVectorFormatV3(
-            self.route_layer,
-            file_path,
-            transform_context,
-            options
-        )
-
-        # writeAsVectorFormatV3 returns (error_code, error_message[, new_file, new_layer])
+            self.route_layer, file_path,
+            QgsProject.instance().transformContext(), options)
         error_code = result[0]
         error_message = result[1] if len(result) > 1 else ""
 
         if error_code != QgsVectorFileWriter.NoError:
-            QgsMessageLog.logMessage(
-                f"Failed to save route: {error_message} (code {error_code}). Check file permissions or format compatibility.",
-                "Plover",
-                Qgis.Critical
-            )
+            self._set_status(f"Save failed: {error_message}", error=True)
+            _log(f"Save failed: {error_message} (code {error_code})", Qgis.Critical)
         else:
-            QgsMessageLog.logMessage(
-                f"Route saved successfully to {file_path} (layer: {options.layerName})",
-                "Plover",
-                Qgis.Info
-            )
+            self._set_status(f"Route saved to {file_path}")
+            _log(f"Route saved to {file_path} (layer {options.layerName})")
 
-    def update_slider_from_input(self):
-        try:
-            value = float(self.buffer_input.text()) * 1000
-            self.buffer_slider.setValue(int(value))
-        except ValueError:
-            QgsMessageLog.logMessage("Error: Buffer distance must be a valid number. Please enter a numeric value.", "Plover", Qgis.Warning)
-            self.buffer_input.setText("0.1")  # Reset to default
+    # ------------------------------------------------------------- closing
 
-    def update_input_from_slider(self):
-        value = self.buffer_slider.value() / 1000
-        self.buffer_input.setText(f"{value:.3f}")
-
-    def run_tsp(self):
-        self.progress_bar.setValue(0)
-        poi_layer = self.poi_combo.currentData()
-        boundary_layer = self.boundary_combo.currentData()
-        if not poi_layer or not boundary_layer:
-            QgsMessageLog.logMessage("Error: Please select both a point layer and a boundary layer.", "Plover", Qgis.Critical)
-            return
-
-        try:
-            buffer_dist = float(self.buffer_input.text())
-            start_index = int(self.start_input.text())
-        except ValueError as e:
-            QgsMessageLog.logMessage(f"Error: Invalid input - Buffer distance must be a number, and Start index must be an integer. Details: {str(e)}", "Plover", Qgis.Critical)
-            return
-
-        # CRS Validation
-        if poi_layer.crs() != boundary_layer.crs():
-            QgsMessageLog.logMessage(f"Warning: Layers have different CRS ({poi_layer.crs().authid()} vs {boundary_layer.crs().authid()}). Results may be inaccurate. Consider reprojecting layers to match.", "Plover", Qgis.Warning)
-            return
-
-        # Extract points with geometry type validation and MultiPointZ conversion
-        points = []
-        for feature in poi_layer.getFeatures():
-            geom = feature.geometry()
-            if geom.type() == QgsWkbTypes.PointGeometry:
-                points.append(geom.asPoint())
-            elif geom.type() == QgsWkbTypes.MultiPointGeometry:
-                multi_points = geom.asMultiPoint()
-                if multi_points:
-                    # Use the centroid of MultiPointZ as a representative point
-                    centroid = QgsGeometry.fromMultiPointXY(multi_points).centroid().asPoint()
-                    points.append(centroid)
-                    QgsMessageLog.logMessage(f"Converted MultiPointZ feature at index {feature.id()} to centroid ({centroid.x():.6f}, {centroid.y():.6f}).", "Plover", Qgis.Info)
-                else:
-                    QgsMessageLog.logMessage(f"Warning: Skipping empty MultiPointZ feature at index {feature.id()}.", "Plover", Qgis.Warning)
-            else:
-                QgsMessageLog.logMessage(f"Warning: Skipping feature with geometry type {geom.typeName()} at index {feature.id()}. Only Point and MultiPoint geometries are supported.", "Plover", Qgis.Warning)
-        if not points:
-            QgsMessageLog.logMessage("Error: No valid point features found in the point layer. Ensure the layer contains Point or MultiPoint geometries.", "Plover", Qgis.Critical)
-            return
-        if start_index < 0 or start_index >= len(points):
-            QgsMessageLog.logMessage(f"Error: Invalid start_point_index {start_index}. Must be between 0 and {len(points) - 1}.", "Plover", Qgis.Critical)
-            return
-
-        boundary_geom = next(boundary_layer.getFeatures(), None)
-        if not boundary_geom or not boundary_geom.geometry().isGeosValid():
-            QgsMessageLog.logMessage("Error: Boundary geometry is invalid or not found. Run 'Fix Geometries' in QGIS or ensure the boundary layer has valid polygon features.", "Plover", Qgis.Critical)
-            return
-        boundary_geom = boundary_geom.geometry()
-
-        buffered_boundary = boundary_geom.buffer(buffer_dist, 5)
-        invalid_points = []
-        for i, point in enumerate(points):
-            point_geom = QgsGeometry.fromPointXY(point)
-            if not point_geom.within(buffered_boundary):
-                distance = point_geom.distance(boundary_geom)
-                invalid_points.append((i, point.x(), point.y(), distance))
-
-        if invalid_points:
-            QgsMessageLog.logMessage(f"Warning: Points not within or on the boundary (buffered by {buffer_dist} units):", "Plover", Qgis.Warning)
-            for idx, x, y, dist in invalid_points:
-                QgsMessageLog.logMessage(f"Point {idx}: ({x:.6f}, {y:.6f}), Distance from boundary: {dist:.6f}", "Plover", Qgis.Warning)
-            QgsMessageLog.logMessage("Some points are outside the boundary. Adjust buffer distance or check layer data.", "Plover", Qgis.Critical)
-            return
-
-        boundary_vertices = self.get_boundary_vertices(boundary_geom)
-        try:
-            waypoint_order, paths, dist, all_nodes = self.find_tsp_route(
-                points, boundary_vertices, boundary_geom, buffered_boundary, start_index
-            )
-            if not waypoint_order or len(waypoint_order) < 2:
-                raise ValueError("Could not find a valid route. Check if points are connected within the boundary.")
-        except Exception as e:
-            QgsMessageLog.logMessage(f"Error during route calculation: {str(e)}. Ensure all points are within the buffered boundary and the start index is valid.", "Plover", Qgis.Critical)
-            return
-
-        try:
-            self.create_route_layer(poi_layer, waypoint_order, paths, dist, all_nodes, boundary_geom)
-            # Total distance is computed from the optimized tour the route layer
-            # actually used. Re-derive it from the layer's geometry to keep this
-            # accurate regardless of internal changes.
-            if self.route_layer and self.route_layer.featureCount() > 0:
-                total_distance = next(self.route_layer.getFeatures()).geometry().length()
-            else:
-                total_distance = 0.0
-            self.distance_output.setText(f"{total_distance:.2f} units")
-            QgsMessageLog.logMessage(f"TSP route created. Total distance: {total_distance:.2f}", "Plover", Qgis.Info)
-        except Exception as e:
-            QgsMessageLog.logMessage(f"Error creating route layer: {str(e)}. Check geometry validity or layer CRS.", "Plover", Qgis.Critical)
+    def closeEvent(self, event):
+        if self.task is not None:
+            self.task.cancel()
+        super().closeEvent(event)
