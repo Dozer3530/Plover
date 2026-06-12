@@ -13,6 +13,7 @@ $zipPath = Join-Path $PSScriptRoot "plover-v$version.zip"
 $runtimeFiles = @(
     "__init__.py",
     "metadata.txt",
+    "LICENSE",
     "icon.png",
     "tsp_route_generator.py",
     "tsp_route_generator_dialog.py",
