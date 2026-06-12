@@ -1,51 +1,34 @@
 <svg viewBox="0 0 96 96" xmlns="http://www.w3.org/2000/svg">
-  <!-- Original Plover icon: stylized piping plover above a dashed TSP route.
-       100% original vector art (no photographic source). -->
+  <!-- Original Plover icon: minimal wireframe piping plover above a dashed
+       TSP route. 100% original vector art (no photographic source). -->
+  <g fill="none" stroke="#2B3540" stroke-width="3"
+     stroke-linecap="round" stroke-linejoin="round">
+    <!-- Body + head outline (single contour, side profile facing right) -->
+    <path d="M14,46
+             C16,33 34,25 52,25
+             C62,24 66,19 72,21
+             L90,28 L74,31
+             C66,34 64,39 60,43
+             C55,51 43,56 30,54
+             C20,53 15,51 14,46 Z"/>
+    <!-- Folded wing (interior line) -->
+    <path d="M28,42 C39,37 52,39 59,44"/>
+    <!-- Legs + feet -->
+    <path d="M44,55 L42,69 M40,69 L46,69"/>
+    <path d="M53,54 L53,69 M50,69 L56,69"/>
+  </g>
 
-  <!-- Route motif: dashed path with waypoint dots (matches route styling) -->
+  <!-- Eye -->
+  <circle cx="70" cy="28" r="2" fill="#2B3540"/>
+
+  <!-- Route motif: dashed path with hollow waypoint dots -->
   <path d="M12,82 C28,74 40,92 56,84 C68,78 78,90 86,82" fill="none"
         stroke="#E8590C" stroke-width="2.4" stroke-linecap="round"
         stroke-dasharray="0.1 6"/>
-  <g fill="#E8590C">
-    <circle cx="12" cy="82" r="3.4"/>
-    <circle cx="40" cy="86" r="3.4"/>
-    <circle cx="62" cy="83" r="3.4"/>
-    <circle cx="86" cy="82" r="3.4"/>
+  <g fill="none" stroke="#E8590C" stroke-width="2">
+    <circle cx="12" cy="82" r="3.2"/>
+    <circle cx="40" cy="86" r="3.2"/>
+    <circle cx="62" cy="83" r="3.2"/>
+    <circle cx="86" cy="82" r="3.2"/>
   </g>
-
-  <!-- Tail -->
-  <path d="M10,42 L30,37 L28,52 Z" fill="#B59B73"/>
-
-  <!-- Body -->
-  <ellipse cx="46" cy="46" rx="27" ry="16.5" fill="#D9C9A8"/>
-  <!-- Folded wing -->
-  <path d="M24,40 Q46,30 66,42 Q48,51 30,50 Z" fill="#B59B73"/>
-  <!-- White belly -->
-  <path d="M26,51 Q46,63 66,51 Q48,57 26,51 Z" fill="#F7F4EE"/>
-
-  <!-- Legs + feet -->
-  <g stroke="#E8771C" stroke-width="2.6" stroke-linecap="round">
-    <line x1="52" y1="58" x2="50" y2="71"/>
-    <line x1="60" y1="58" x2="60" y2="71"/>
-  </g>
-  <g stroke="#E8771C" stroke-width="2.2" stroke-linecap="round">
-    <line x1="50" y1="71" x2="46" y2="73"/>
-    <line x1="50" y1="71" x2="54" y2="73"/>
-    <line x1="60" y1="71" x2="56" y2="73"/>
-    <line x1="60" y1="71" x2="64" y2="73"/>
-  </g>
-
-  <!-- Head -->
-  <circle cx="70" cy="30" r="12.5" fill="#D9C9A8"/>
-  <!-- White face -->
-  <path d="M60,33 Q70,41 81,33 Q72,44 60,38 Z" fill="#F7F4EE"/>
-  <!-- Black crown -->
-  <path d="M58,27 Q70,13 82,27 Q70,20 58,27 Z" fill="#1E2A32"/>
-  <!-- Black breast band -->
-  <path d="M54,33 Q57,47 65,47 Q60,40 60,33 Z" fill="#1E2A32"/>
-  <!-- Eye -->
-  <circle cx="73" cy="27" r="2.2" fill="#1E2A32"/>
-  <!-- Bill (orange with black tip) -->
-  <path d="M82,29 L94,30.5 L82,33 Z" fill="#F2933C"/>
-  <path d="M89.5,30 L94,30.5 L89.5,31.8 Z" fill="#1E2A32"/>
 </svg>
