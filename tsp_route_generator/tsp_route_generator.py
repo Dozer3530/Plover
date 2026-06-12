@@ -26,7 +26,9 @@ class TSPRouteGenerator:
         action.setStatusTip("Boundary-aware TSP route through a point layer")
         action.triggered.connect(self.run)
         self.iface.addToolBarIcon(action)
-        self.iface.addPluginToMenu(self.menu, action)
+        # Plover is a vector tool (category=Vector), so it belongs in the
+        # Vector menu rather than the generic Plugins menu.
+        self.iface.addPluginToVectorMenu(self.menu, action)
         self.actions.append(action)
         self.initProcessing()
 
@@ -37,7 +39,7 @@ class TSPRouteGenerator:
 
     def unload(self):
         for action in self.actions:
-            self.iface.removePluginMenu(self.menu, action)
+            self.iface.removePluginVectorMenu(self.menu, action)
             self.iface.removeToolBarIcon(action)
         self.actions = []
         if self.provider is not None:

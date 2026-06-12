@@ -4,7 +4,7 @@ qgisMinimumVersion=3.22
 qgisMaximumVersion=4.99
 supportsQt6=True
 description=Boundary-aware Traveling Salesperson routing: shortest tour through your points, around your sloughs.
-version=3.2.4
+version=3.2.5
 author=Zachary Komarnisky
 email=zkomarnisky@oldscollege.ca
 license=MIT
@@ -16,7 +16,9 @@ repository=https://github.com/Dozer3530/Plover
 
 hasProcessingProvider=yes
 
-changelog=3.2.4
+changelog=3.2.5
+      - Plover now lives under the Vector menu (it is a vector tool) instead of the generic Plugins menu
+      3.2.4
       - Minimal wireframe (monoline) icon
       3.2.3
       - New original vector icon (stylized plover above a dashed route), replacing the previous photo-derived icon — removes any third-party image licensing concern
