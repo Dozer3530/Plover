@@ -178,12 +178,16 @@ def build_visibility_adjacency(nodes, region, progress=None, should_cancel=None)
     holes are not part of the polygon interior. Uses a prepared geometry
     engine, so each test is a fast GEOS predicate instead of an overlay.
 
+    If ``region`` is None there is no boundary constraint: every pair of nodes
+    is connected by its straight-line (Euclidean) distance, i.e. an ordinary
+    complete-graph TSP with no obstacle avoidance.
+
     Returns {i: {j: distance}} adjacency.
     """
     n = len(nodes)
     adjacency = {i: {} for i in range(n)}
     qgs_points = [QgsPoint(p.x(), p.y()) for p in nodes]
-    engine = prepared_engine(region)
+    engine = prepared_engine(region) if region is not None else None
     total = n * (n - 1) // 2
     done = 0
     for i in range(n):
@@ -196,6 +200,9 @@ def build_visibility_adjacency(nodes, region, progress=None, should_cancel=None)
                 # Coincident nodes (e.g. a waypoint sitting exactly on a kept
                 # boundary vertex): free hop, no geometry test needed.
                 adjacency[i][j] = adjacency[j][i] = 0.0
+            elif engine is None:
+                # No boundary: straight line between every pair is allowed.
+                adjacency[i][j] = adjacency[j][i] = d
             else:
                 seg = QgsLineString([qgs_points[i], qgs_points[j]])
                 if engine.contains(seg):

@@ -4,18 +4,20 @@ qgisMinimumVersion=3.22
 qgisMaximumVersion=4.99
 supportsQt6=True
 description=Boundary-aware Traveling Salesperson routing: shortest tour through your points, around your sloughs.
-version=3.1.0
+version=3.2.0
 author=Zachary Komarnisky
 email=zkomarnisky@oldscollege.ca
 
-about=Plover generates an optimized TSP (Traveling Salesperson) route through a point layer, constrained to stay within a polygon boundary and to route around interior rings (holes / sloughs / exclusion zones). It builds a visibility graph over the points and the boundary's concave corners, computes obstacle-aware shortest paths between all points, and optimizes the visiting order with multi-start nearest-neighbour, 2-opt and Or-opt. Includes a dialog with live progress (runs in the background, cancellable), a numbered visit-order output layer, GPX/KML export for field navigation, and a Processing algorithm for use in models and batch runs.
+about=Plover generates an optimized TSP (Traveling Salesperson) route through a point layer, optionally constrained to stay within a polygon boundary and to route around interior rings (holes / sloughs / exclusion zones). Without a boundary it solves a plain straight-line Euclidean TSP. It builds a visibility graph over the points and the boundary's concave corners, computes obstacle-aware shortest paths between all points, and optimizes the visiting order with multi-start nearest-neighbour, 2-opt and Or-opt. Includes a dialog with live progress (runs in the background, cancellable), a numbered visit-order output layer, GPX/KML export for field navigation, and a Processing algorithm for use in models and batch runs.
 
 tracker=https://github.com/Dozer3530/Plover/issues
 repository=https://github.com/Dozer3530/Plover
 
 hasProcessingProvider=yes
 
-changelog=3.1.0
+changelog=3.2.0
+      - Boundary is now optional: leave it empty for a plain straight-line (Euclidean) TSP through the points, no obstacle avoidance. With no boundary the working CRS is the point layer's.
+      3.1.0
       - New "Points outside boundary" option: fail (require all points inside) or skip (route only the points inside the boundary) — route one field's points from a layer that spans many fields
       3.0.0
       - Routing now runs in a background task: QGIS stays responsive, runs are cancellable

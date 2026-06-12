@@ -52,8 +52,9 @@ class DialogSmokeTests(unittest.TestCase):
         self.assertGreaterEqual(d.buffer_spin.value(), 0.0)
 
     def test_run_without_layers_reports_error(self):
+        # Boundary is optional, but a point layer is still required.
         self.dialog.run_tsp()
-        self.assertIn("Select both", self.dialog.status_label.text())
+        self.assertIn("point layer", self.dialog.status_label.text())
 
     def test_output_layers_built_from_result(self):
         points = [QgsPointXY(0, 0), QgsPointXY(100, 0), QgsPointXY(100, 50)]

@@ -188,6 +188,27 @@ class ComputeRouteTests(unittest.TestCase):
             compute_route(self.POINTS, field_with_slough(), 0.5, 0,
                           closed=True, should_cancel=lambda: True)
 
+    def test_no_boundary_is_euclidean_tsp(self):
+        # With boundary_geom=None the graph is complete (no turn vertices) and
+        # legs are straight-line distances between consecutive stops.
+        import math
+        result = compute_route(self.POINTS, None, 0.0, 0, closed=True)
+        self.assertEqual(result.node_count, len(self.POINTS))  # no extra vertices
+        self.assertEqual(len(result.order), len(self.POINTS))
+        for rank, leg in enumerate(result.leg_lengths):
+            a = self.POINTS[result.order[rank]]
+            b = self.POINTS[result.order[(rank + 1) % len(result.order)]]
+            self.assertAlmostEqual(leg, math.hypot(a.x() - b.x(), a.y() - b.y()),
+                                   places=6)
+
+    def test_no_boundary_ignores_obstacles(self):
+        # Same two points that must detour around the slough when a boundary is
+        # given now connect by a straight line of exactly 60 with no boundary.
+        import math
+        pts = [QgsPointXY(20, 30), QgsPointXY(80, 30)]
+        result = compute_route(pts, None, 0.0, 0, closed=False)
+        self.assertAlmostEqual(result.total_length, 60.0, places=6)
+
 
 @unittest.skipUnless(HAVE_QGIS, "QGIS not available")
 class ProcessingAlgorithmTests(unittest.TestCase):
@@ -323,6 +344,45 @@ class ProcessingAlgorithmTests(unittest.TestCase):
         self.assertEqual(route_feature["stops"], 4)
         order = context.takeResultLayer(results["OUTPUT_ORDER"])
         self.assertEqual(order.featureCount(), 4)
+
+    def test_no_boundary_processing_run(self):
+        """Omitting BOUNDARY runs a plain Euclidean TSP; output CRS falls back
+        to the point layer's CRS."""
+        from qgis.core import (
+            QgsFeature,
+            QgsProcessingContext,
+            QgsProcessingFeedback,
+            QgsVectorLayer,
+        )
+        from tsp_route_generator.processing_provider import PloverRouteAlgorithm
+
+        crs = "EPSG:32612"
+        point_layer = QgsVectorLayer(f"Point?crs={crs}", "pts", "memory")
+        coords = [(0, 0), (10, 0), (10, 10), (0, 10), (5, 5)]
+        feats = []
+        for x, y in coords:
+            f = QgsFeature()
+            f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(x, y)))
+            feats.append(f)
+        point_layer.dataProvider().addFeatures(feats)
+
+        alg = PloverRouteAlgorithm()
+        alg.initAlgorithm({})
+        context = QgsProcessingContext()
+        results, ok = alg.run({
+            "POINTS": point_layer,
+            # BOUNDARY intentionally omitted
+            "START_INDEX": 0,
+            "ROUND_TRIP": True,
+            "OUTPUT_ROUTE": "memory:route",
+            "OUTPUT_ORDER": "memory:order",
+        }, context, QgsProcessingFeedback())
+        self.assertTrue(ok)
+        route = context.takeResultLayer(results["OUTPUT_ROUTE"])
+        self.assertEqual(route.crs().authid(), crs)
+        route_feature = next(route.getFeatures())
+        self.assertEqual(route_feature["stops"], 5)
+        self.assertGreater(route_feature.geometry().length(), 0.0)
 
 
 if __name__ == "__main__":

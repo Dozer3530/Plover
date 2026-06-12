@@ -46,15 +46,24 @@ def compute_route(points, boundary_geom, buffer_dist, start_index,
     points: list[QgsPointXY] already validated to lie inside the buffered
     boundary and already in the boundary CRS. Raises tsp_core.RoutingError for
     user-actionable problems and tsp_core.TSPCancelled on cancellation.
+
+    boundary_geom may be None: with no boundary the route is an ordinary
+    Euclidean TSP (straight lines between points, no obstacle avoidance).
     """
     progress = set_progress or (lambda value: None)
 
-    # A zero buffer would reject segments that run exactly along the boundary
-    # edge (GEOS 'contains' excludes the boundary itself), so always allow a
-    # whisker of tolerance.
-    region = boundary_geom.buffer(max(buffer_dist, 1e-6), 8)
-
-    vertices = useful_boundary_vertices(boundary_geom)
+    if boundary_geom is None:
+        # No constraint: complete graph of straight-line distances, no extra
+        # turn vertices. region=None tells build_visibility_adjacency to skip
+        # the containment test entirely.
+        region = None
+        vertices = []
+    else:
+        # A zero buffer would reject segments that run exactly along the
+        # boundary edge (GEOS 'contains' excludes the boundary itself), so
+        # always allow a whisker of tolerance.
+        region = boundary_geom.buffer(max(buffer_dist, 1e-6), 8)
+        vertices = useful_boundary_vertices(boundary_geom)
     nodes = list(points) + vertices
 
     adjacency = build_visibility_adjacency(
@@ -106,7 +115,8 @@ class PloverRouteTask(QgsTask):
                  closed, on_done, description="Plover: computing route"):
         super().__init__(description, _CAN_CANCEL)
         self._points = list(points)
-        self._boundary = QgsGeometry(boundary_geom)  # private copy for the worker thread
+        # Private copy for the worker thread; None means "no boundary".
+        self._boundary = QgsGeometry(boundary_geom) if boundary_geom is not None else None
         self._buffer = buffer_dist
         self._start = start_index
         self._closed = closed

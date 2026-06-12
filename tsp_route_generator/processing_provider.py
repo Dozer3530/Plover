@@ -84,6 +84,8 @@ class PloverRouteAlgorithm(QgsProcessingAlgorithm):
             "Computes the shortest tour visiting every input point while "
             "staying inside the boundary polygon and routing around its "
             "holes (exclusion zones).\n\n"
+            "The boundary is optional: leave it unset for a plain straight-line "
+            "(Euclidean) tour through the points with no obstacle avoidance.\n\n"
             "The boundary buffer lets the route pass slightly outside the "
             "strict boundary (and into exclusion zones) — useful when points "
             "sit exactly on the field edge.\n\n"
@@ -101,7 +103,7 @@ class PloverRouteAlgorithm(QgsProcessingAlgorithm):
         self.addParameter(QgsProcessingParameterFeatureSource(
             self.POINTS, "Points to visit", [_TYPE_POINT]))
         self.addParameter(QgsProcessingParameterFeatureSource(
-            self.BOUNDARY, "Boundary polygon(s)", [_TYPE_POLYGON]))
+            self.BOUNDARY, "Boundary polygon(s)", [_TYPE_POLYGON], optional=True))
         self.addParameter(QgsProcessingParameterDistance(
             self.BUFFER, "Boundary buffer", defaultValue=0.5,
             parentParameterName=self.BOUNDARY, minValue=0.0))
@@ -129,23 +131,30 @@ class PloverRouteAlgorithm(QgsProcessingAlgorithm):
         closed = self.parameterAsBoolean(parameters, self.ROUND_TRIP, context)
         on_outside = self.parameterAsEnum(parameters, self.ON_OUTSIDE, context)
 
-        boundary_crs = boundary_source.sourceCrs()
-        if boundary_crs.isGeographic():
+        # Boundary is optional. With one, routing stays inside it and routes
+        # around holes; without one, the working CRS is the point layer's and
+        # the result is a plain straight-line (Euclidean) TSP.
+        boundary_geom = None
+        working_crs = (boundary_source.sourceCrs() if boundary_source is not None
+                       else point_source.sourceCrs())
+        if working_crs.isGeographic():
+            which = "boundary" if boundary_source is not None else "point"
             raise QgsProcessingException(
-                "The boundary layer uses a geographic CRS (degrees); "
+                f"The {which} layer uses a geographic CRS (degrees); "
                 "reproject to a projected CRS (e.g. UTM) first.")
 
-        geoms = [f.geometry() for f in boundary_source.getFeatures() if f.hasGeometry()]
-        boundary_geom, notes = collect_boundary_geometry(geoms)
-        for note in notes:
-            feedback.pushInfo(note)
-        if boundary_geom is None:
-            raise QgsProcessingException("Boundary layer contains no usable polygons.")
+        if boundary_source is not None:
+            geoms = [f.geometry() for f in boundary_source.getFeatures() if f.hasGeometry()]
+            boundary_geom, notes = collect_boundary_geometry(geoms)
+            for note in notes:
+                feedback.pushInfo(note)
+            if boundary_geom is None:
+                raise QgsProcessingException("Boundary layer contains no usable polygons.")
 
         transform = None
-        if point_source.sourceCrs() != boundary_crs:
+        if point_source.sourceCrs() != working_crs:
             transform = QgsCoordinateTransform(
-                point_source.sourceCrs(), boundary_crs, context.transformContext())
+                point_source.sourceCrs(), working_crs, context.transformContext())
 
         points, fids = [], []
         for feature in point_source.getFeatures():
@@ -164,9 +173,10 @@ class PloverRouteAlgorithm(QgsProcessingAlgorithm):
             raise QgsProcessingException(
                 f"Start point index must be between 0 and {len(points) - 1}.")
 
-        region = boundary_geom.buffer(max(buffer_dist, 1e-6), 8)
-        outside = points_outside_region(points, region)
         skipped = 0
+        outside = (points_outside_region(
+            points, boundary_geom.buffer(max(buffer_dist, 1e-6), 8))
+            if boundary_geom is not None else [])
         if outside:
             if on_outside == self.OUTSIDE_SKIP:
                 # Remember the requested start before indices shift.
@@ -211,7 +221,7 @@ class PloverRouteAlgorithm(QgsProcessingAlgorithm):
             "LineString?field=length:double&field=stops:integer&field=round_trip:string(3)")
         (route_sink, route_id) = self.parameterAsSink(
             parameters, self.OUTPUT_ROUTE, context,
-            route_fields, _WKB_LINESTRING, boundary_crs)
+            route_fields, _WKB_LINESTRING, working_crs)
         if route_sink is None:
             raise QgsProcessingException(
                 self.invalidSinkError(parameters, self.OUTPUT_ROUTE))
@@ -227,7 +237,7 @@ class PloverRouteAlgorithm(QgsProcessingAlgorithm):
             "Point?field=visit_order:integer&field=source_fid:integer&field=leg_length:double")
         (order_sink, order_id) = self.parameterAsSink(
             parameters, self.OUTPUT_ORDER, context,
-            order_fields, _WKB_POINT, boundary_crs)
+            order_fields, _WKB_POINT, working_crs)
         if order_sink is not None:
             for rank, wp_index in enumerate(result.order):
                 f = QgsFeature(order_fields)

@@ -93,6 +93,11 @@ class TSPRouteGeneratorDialog(QDialog):
 
         self.boundary_combo = QgsMapLayerComboBox()
         self.boundary_combo.setFilters(_POLY_FILTER)
+        self.boundary_combo.setAllowEmptyLayer(True)
+        self.boundary_combo.setToolTip(
+            "Optional. With a boundary, the route stays inside it and routes\n"
+            "around holes (sloughs / exclusion zones). Leave empty for a plain\n"
+            "straight-line route through the points (ordinary Euclidean TSP).")
         form.addRow("Boundary layer:", self.boundary_combo)
 
         self.start_picker = QgsFeaturePickerWidget()
@@ -170,6 +175,15 @@ class TSPRouteGeneratorDialog(QDialog):
         buttons.addWidget(self.close_button)
         layout.addLayout(buttons)
 
+        # Buffer / outside-mode only matter when there is a boundary to respect.
+        self.boundary_combo.layerChanged.connect(self._update_boundary_dependent_state)
+        self._update_boundary_dependent_state()
+
+    def _update_boundary_dependent_state(self, *args):
+        has_boundary = self.boundary_combo.currentLayer() is not None
+        self.buffer_spin.setEnabled(has_boundary)
+        self.outside_mode.setEnabled(has_boundary)
+
     def _set_status(self, text, error=False):
         self.status_label.setStyleSheet("color: #c0392b;" if error else "")
         self.status_label.setText(text)
@@ -181,6 +195,8 @@ class TSPRouteGeneratorDialog(QDialog):
                   self.buffer_spin, self.round_trip, self.selected_only,
                   self.outside_mode, self.make_order_layer):
             w.setEnabled(not running)
+        if not running:
+            self._update_boundary_dependent_state()
 
     # ------------------------------------------------------------ settings
 
@@ -209,28 +225,34 @@ class TSPRouteGeneratorDialog(QDialog):
 
         poi_layer = self.poi_combo.currentLayer()
         boundary_layer = self.boundary_combo.currentLayer()
-        if poi_layer is None or boundary_layer is None:
-            self._set_status("Select both a point layer and a boundary layer.", error=True)
+        if poi_layer is None:
+            self._set_status("Select a point layer.", error=True)
             return
 
-        boundary_crs = boundary_layer.crs()
-        if boundary_crs.isGeographic():
+        # The boundary is optional. With one, routing stays inside it and
+        # dodges holes; without one, the working CRS is the point layer's and
+        # the route is a plain straight-line (Euclidean) TSP.
+        working_crs = boundary_layer.crs() if boundary_layer is not None else poi_layer.crs()
+        if working_crs.isGeographic():
+            which = "boundary" if boundary_layer is not None else "point"
             self._set_status(
-                "The boundary layer uses a geographic CRS (degrees). Distances "
-                "would be meaningless — reproject both layers to a projected "
-                "CRS (e.g. UTM) first.", error=True)
+                f"The {which} layer uses a geographic CRS (degrees). Distances "
+                "would be meaningless — reproject to a projected CRS "
+                "(e.g. UTM) first.", error=True)
             return
 
-        # --- boundary geometry (merge all polygon features) ---
-        geoms = [f.geometry() for f in boundary_layer.getFeatures() if f.hasGeometry()]
-        boundary_geom, notes = collect_boundary_geometry(geoms)
-        for note in notes:
-            _log(note, Qgis.Warning)
-        if boundary_geom is None:
-            self._set_status("The boundary layer contains no usable polygons.", error=True)
-            return
+        # --- boundary geometry (merge all polygon features), if any ---
+        boundary_geom = None
+        if boundary_layer is not None:
+            geoms = [f.geometry() for f in boundary_layer.getFeatures() if f.hasGeometry()]
+            boundary_geom, notes = collect_boundary_geometry(geoms)
+            for note in notes:
+                _log(note, Qgis.Warning)
+            if boundary_geom is None:
+                self._set_status("The boundary layer contains no usable polygons.", error=True)
+                return
 
-        # --- points (optionally selection only), transformed to boundary CRS ---
+        # --- points (optionally selection only), transformed to working CRS ---
         if self.selected_only.isChecked():
             features = list(poi_layer.selectedFeatures())
             if not features:
@@ -240,11 +262,11 @@ class TSPRouteGeneratorDialog(QDialog):
             features = list(poi_layer.getFeatures())
 
         transform = None
-        if poi_layer.crs() != boundary_crs:
-            transform = QgsCoordinateTransform(poi_layer.crs(), boundary_crs,
+        if poi_layer.crs() != working_crs:
+            transform = QgsCoordinateTransform(poi_layer.crs(), working_crs,
                                                QgsProject.instance())
             _log(f"Reprojecting points from {poi_layer.crs().authid()} "
-                 f"to {boundary_crs.authid()} for routing.")
+                 f"to {working_crs.authid()} for routing.")
 
         points, fids = [], []
         for feature in features:
@@ -272,11 +294,11 @@ class TSPRouteGeneratorDialog(QDialog):
             self._set_status("Need at least two point features to build a route.", error=True)
             return
 
-        # --- containment check against the buffered boundary ---
+        # --- containment check against the buffered boundary (boundary only) ---
         buffer_dist = self.buffer_spin.value()
-        region = boundary_geom.buffer(max(buffer_dist, 1e-6), 8)
-        outside = points_outside_region(points, region)
         skipped_fids = set()
+        outside = points_outside_region(points, boundary_geom.buffer(
+            max(buffer_dist, 1e-6), 8)) if boundary_geom is not None else []
         if outside:
             for idx in outside:
                 p = points[idx]
@@ -328,7 +350,7 @@ class TSPRouteGeneratorDialog(QDialog):
         self._set_status(f"Routing {len(points)} points…")
         self._run_meta = {
             "poi_layer": poi_layer,
-            "crs_authid": boundary_crs.authid(),
+            "crs_authid": working_crs.authid(),
             "fids": fids,
             "points": points,
             "closed": self.round_trip.isChecked(),
