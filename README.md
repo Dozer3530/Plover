@@ -1,4 +1,4 @@
-<div align="center"><img src="assets/piping-plover-removebg-preview.png" alt="Plover" width="240"></div>
+<div align="center"><img src="assets/plover-icon.svg" alt="Plover" width="180"></div>
 
 # Plover
 
