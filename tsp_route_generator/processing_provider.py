@@ -17,6 +17,7 @@ from qgis.core import (
     QgsProcessingException,
     QgsProcessingParameterBoolean,
     QgsProcessingParameterDistance,
+    QgsProcessingParameterEnum,
     QgsProcessingParameterFeatureSink,
     QgsProcessingParameterFeatureSource,
     QgsProcessingParameterNumber,
@@ -64,8 +65,13 @@ class PloverRouteAlgorithm(QgsProcessingAlgorithm):
     BUFFER = "BUFFER"
     START_INDEX = "START_INDEX"
     ROUND_TRIP = "ROUND_TRIP"
+    ON_OUTSIDE = "ON_OUTSIDE"
     OUTPUT_ROUTE = "OUTPUT_ROUTE"
     OUTPUT_ORDER = "OUTPUT_ORDER"
+
+    # ON_OUTSIDE enum options (index order is part of the algorithm's API).
+    OUTSIDE_FAIL = 0
+    OUTSIDE_SKIP = 1
 
     def name(self):
         return "tsproute"
@@ -81,6 +87,9 @@ class PloverRouteAlgorithm(QgsProcessingAlgorithm):
             "The boundary buffer lets the route pass slightly outside the "
             "strict boundary (and into exclusion zones) — useful when points "
             "sit exactly on the field edge.\n\n"
+            "Points outside the buffered boundary can either fail the run or be "
+            "skipped — skip is handy when one point layer spans many fields and "
+            "you only want to route the points inside this boundary.\n\n"
             "Outputs the route line plus an optional point layer numbered in "
             "visiting order. Layers must use a projected CRS."
         )
@@ -101,6 +110,11 @@ class PloverRouteAlgorithm(QgsProcessingAlgorithm):
             _NUM_INTEGER, defaultValue=0, minValue=0))
         self.addParameter(QgsProcessingParameterBoolean(
             self.ROUND_TRIP, "Return to start (round trip)", defaultValue=True))
+        self.addParameter(QgsProcessingParameterEnum(
+            self.ON_OUTSIDE, "Points outside the boundary",
+            options=["Fail if any point is outside",
+                     "Skip points outside the boundary"],
+            defaultValue=self.OUTSIDE_FAIL))
         self.addParameter(QgsProcessingParameterFeatureSink(
             self.OUTPUT_ROUTE, "Route", _TYPE_LINE))
         self.addParameter(QgsProcessingParameterFeatureSink(
@@ -113,6 +127,7 @@ class PloverRouteAlgorithm(QgsProcessingAlgorithm):
         buffer_dist = self.parameterAsDouble(parameters, self.BUFFER, context)
         start_index = self.parameterAsInt(parameters, self.START_INDEX, context)
         closed = self.parameterAsBoolean(parameters, self.ROUND_TRIP, context)
+        on_outside = self.parameterAsEnum(parameters, self.ON_OUTSIDE, context)
 
         boundary_crs = boundary_source.sourceCrs()
         if boundary_crs.isGeographic():
@@ -151,12 +166,37 @@ class PloverRouteAlgorithm(QgsProcessingAlgorithm):
 
         region = boundary_geom.buffer(max(buffer_dist, 1e-6), 8)
         outside = points_outside_region(points, region)
+        skipped = 0
         if outside:
-            shown = ", ".join(str(fids[i]) for i in outside[:12])
-            raise QgsProcessingException(
-                f"{len(outside)} point(s) are outside the buffered boundary "
-                f"(feature ids: {shown}{'…' if len(outside) > 12 else ''}). "
-                "Increase the buffer or fix the data.")
+            if on_outside == self.OUTSIDE_SKIP:
+                # Remember the requested start before indices shift.
+                start_fid = fids[start_index]
+                outside_set = set(outside)
+                skipped = len(outside)
+                points = [p for i, p in enumerate(points) if i not in outside_set]
+                fids = [f for i, f in enumerate(fids) if i not in outside_set]
+                if len(points) < 2:
+                    raise QgsProcessingException(
+                        f"Only {len(points)} point(s) fall inside the boundary — "
+                        "need at least two. Increase the buffer or use a boundary "
+                        "that contains more points.")
+                if start_fid in fids:
+                    start_index = fids.index(start_fid)
+                else:
+                    start_index = 0
+                    feedback.pushWarning(
+                        "Start point lies outside the boundary and was skipped; "
+                        "starting from the first in-boundary point instead.")
+                feedback.pushInfo(
+                    f"Skipped {skipped} point(s) outside the boundary; "
+                    f"routing the {len(points)} inside.")
+            else:  # OUTSIDE_FAIL
+                shown = ", ".join(str(fids[i]) for i in outside[:12])
+                raise QgsProcessingException(
+                    f"{len(outside)} point(s) are outside the buffered boundary "
+                    f"(feature ids: {shown}{'…' if len(outside) > 12 else ''}). "
+                    "Increase the buffer, set 'Points outside the boundary' to "
+                    "skip, or fix the data.")
 
         try:
             result = compute_route(
@@ -199,7 +239,8 @@ class PloverRouteAlgorithm(QgsProcessingAlgorithm):
 
         feedback.pushInfo(
             f"Route: {len(result.order)} stops, {result.total_length:.2f} units "
-            f"({'round trip' if closed else 'one-way'}).")
+            f"({'round trip' if closed else 'one-way'})"
+            f"{f', {skipped} skipped' if skipped else ''}.")
         return outputs
 
 

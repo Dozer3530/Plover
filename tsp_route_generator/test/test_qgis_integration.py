@@ -200,7 +200,7 @@ class ProcessingAlgorithmTests(unittest.TestCase):
         names = [p.name() for p in alg.parameterDefinitions()]
         self.assertEqual(
             names, ["POINTS", "BOUNDARY", "BUFFER", "START_INDEX",
-                    "ROUND_TRIP", "OUTPUT_ROUTE", "OUTPUT_ORDER"])
+                    "ROUND_TRIP", "ON_OUTSIDE", "OUTPUT_ROUTE", "OUTPUT_ORDER"])
 
     def test_provider_constructs(self):
         from tsp_route_generator.processing_provider import PloverProcessingProvider
@@ -263,6 +263,66 @@ class ProcessingAlgorithmTests(unittest.TestCase):
         self.assertEqual(order.featureCount(), 6)
         ranks = sorted(f["visit_order"] for f in order.getFeatures())
         self.assertEqual(ranks, [1, 2, 3, 4, 5, 6])
+
+    def test_skip_mode_routes_only_inside_points(self):
+        """One point layer spanning two far-apart fields; with ON_OUTSIDE=skip
+        and a boundary on the first field, only the inside points are routed."""
+        from qgis.core import (
+            QgsFeature,
+            QgsProcessingContext,
+            QgsProcessingFeedback,
+            QgsProcessingException,
+            QgsVectorLayer,
+        )
+        from tsp_route_generator.processing_provider import PloverRouteAlgorithm
+
+        crs = "EPSG:32612"
+        point_layer = QgsVectorLayer(f"Point?crs={crs}", "pts", "memory")
+        # Four points inside a 0..100 field, three far away near x=10000.
+        inside = [(10, 10), (90, 10), (90, 90), (10, 90)]
+        outside = [(10000, 10), (10050, 50), (10010, 90)]
+        feats = []
+        for x, y in inside + outside:
+            f = QgsFeature()
+            f.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(x, y)))
+            feats.append(f)
+        point_layer.dataProvider().addFeatures(feats)
+
+        boundary_layer = QgsVectorLayer(f"Polygon?crs={crs}", "field", "memory")
+        bf = QgsFeature()
+        bf.setGeometry(QgsGeometry.fromPolygonXY([rect(0, 0, 100, 100)]))
+        boundary_layer.dataProvider().addFeatures([bf])
+
+        base_params = {
+            "POINTS": point_layer,
+            "BOUNDARY": boundary_layer,
+            "BUFFER": 0.5,
+            "START_INDEX": 0,
+            "ROUND_TRIP": True,
+            "OUTPUT_ROUTE": "memory:route",
+            "OUTPUT_ORDER": "memory:order",
+        }
+
+        # Default (fail) mode must raise because three points are outside.
+        alg_fail = PloverRouteAlgorithm()
+        alg_fail.initAlgorithm({})
+        with self.assertRaises(QgsProcessingException):
+            alg_fail.processAlgorithm(
+                dict(base_params, ON_OUTSIDE=0),
+                QgsProcessingContext(), QgsProcessingFeedback())
+
+        # Skip mode routes only the four inside points.
+        alg_skip = PloverRouteAlgorithm()
+        alg_skip.initAlgorithm({})
+        context = QgsProcessingContext()
+        results, ok = alg_skip.run(
+            dict(base_params, ON_OUTSIDE=1), context, QgsProcessingFeedback())
+        self.assertTrue(ok)
+        route = context.takeResultLayer(results["OUTPUT_ROUTE"])
+        route_feature = next(route.getFeatures())
+        self.assertEqual(route_feature["stops"], 4)
+        order = context.takeResultLayer(results["OUTPUT_ORDER"])
+        self.assertEqual(order.featureCount(), 4)
 
 
 if __name__ == "__main__":

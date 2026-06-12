@@ -7,6 +7,7 @@ import os
 
 from qgis.PyQt.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QDialog,
     QDoubleSpinBox,
     QFileDialog,
@@ -112,6 +113,17 @@ class TSPRouteGeneratorDialog(QDialog):
         )
         form.addRow("Boundary buffer:", self.buffer_spin)
 
+        self.outside_mode = QComboBox()
+        self.outside_mode.addItem("Fail if any point is outside", "fail")
+        self.outside_mode.addItem("Skip points outside the boundary", "skip")
+        self.outside_mode.setToolTip(
+            "What to do with points that fall outside the buffered boundary.\n"
+            "Fail: stop and report them (good when every point should be in-field).\n"
+            "Skip: drop them and route only the points inside (good for one big\n"
+            "point layer spanning many fields — route just this field's points)."
+        )
+        form.addRow("Points outside boundary:", self.outside_mode)
+
         self.round_trip = QCheckBox("Return to start (round trip)")
         self.round_trip.setChecked(True)
         form.addRow("", self.round_trip)
@@ -167,7 +179,7 @@ class TSPRouteGeneratorDialog(QDialog):
         self.cancel_button.setEnabled(running)
         for w in (self.poi_combo, self.boundary_combo, self.start_picker,
                   self.buffer_spin, self.round_trip, self.selected_only,
-                  self.make_order_layer):
+                  self.outside_mode, self.make_order_layer):
             w.setEnabled(not running)
 
     # ------------------------------------------------------------ settings
@@ -177,12 +189,16 @@ class TSPRouteGeneratorDialog(QDialog):
         self.buffer_spin.setValue(float(s.value("plover/buffer", 0.5)))
         self.round_trip.setChecked(s.value("plover/round_trip", True, type=bool))
         self.make_order_layer.setChecked(s.value("plover/order_layer", True, type=bool))
+        mode_index = self.outside_mode.findData(s.value("plover/outside_mode", "fail"))
+        if mode_index >= 0:
+            self.outside_mode.setCurrentIndex(mode_index)
 
     def _save_settings(self):
         s = QgsSettings()
         s.setValue("plover/buffer", self.buffer_spin.value())
         s.setValue("plover/round_trip", self.round_trip.isChecked())
         s.setValue("plover/order_layer", self.make_order_layer.isChecked())
+        s.setValue("plover/outside_mode", self.outside_mode.currentData())
 
     # ------------------------------------------------------------- run flow
 
@@ -256,33 +272,56 @@ class TSPRouteGeneratorDialog(QDialog):
             self._set_status("Need at least two point features to build a route.", error=True)
             return
 
-        # --- start point ---
-        start_feature = self.start_picker.feature()
-        if start_feature is not None and start_feature.isValid() and start_feature.id() in fids:
-            start_index = fids.index(start_feature.id())
-        else:
-            start_index = 0
-            if self.selected_only.isChecked():
-                _log("Chosen start point is not in the selection; starting "
-                     "from the first selected point instead.", Qgis.Warning)
-
-        # --- containment validation against the buffered boundary ---
+        # --- containment check against the buffered boundary ---
         buffer_dist = self.buffer_spin.value()
         region = boundary_geom.buffer(max(buffer_dist, 1e-6), 8)
         outside = points_outside_region(points, region)
+        skipped_fids = set()
         if outside:
             for idx in outside:
                 p = points[idx]
                 d = QgsGeometry.fromPointXY(p).distance(boundary_geom)
                 _log(f"Point fid={fids[idx]} at ({p.x():.2f}, {p.y():.2f}) is "
                      f"{d:.2f} units outside the boundary.", Qgis.Warning)
-            if not self.selected_only.isChecked():
-                poi_layer.selectByIds([fids[i] for i in outside])
-            self._set_status(
-                f"{len(outside)} point(s) fall outside the buffered boundary "
-                "(now selected on the layer; details in the log). Increase the "
-                "buffer or fix the data.", error=True)
-            return
+
+            if self.outside_mode.currentData() == "skip":
+                # Keep only the points inside the boundary; route those.
+                outside_set = set(outside)
+                skipped_fids = {fids[i] for i in outside}
+                points = [p for i, p in enumerate(points) if i not in outside_set]
+                fids = [f for i, f in enumerate(fids) if i not in outside_set]
+                if len(points) < 2:
+                    self._set_status(
+                        f"Only {len(points)} point(s) fall inside the boundary — "
+                        "need at least two to build a route. Increase the buffer "
+                        "or pick a boundary that contains more points.", error=True)
+                    return
+                _log(f"Skipping {len(outside)} point(s) outside the boundary; "
+                     f"routing the {len(points)} inside.")
+            else:  # "fail"
+                if not self.selected_only.isChecked():
+                    poi_layer.selectByIds([fids[i] for i in outside])
+                self._set_status(
+                    f"{len(outside)} point(s) fall outside the buffered boundary "
+                    "(now selected on the layer; details in the log). Increase the "
+                    "buffer, switch 'Points outside boundary' to skip, or fix the "
+                    "data.", error=True)
+                return
+
+        # --- start point (resolved against the final, in-boundary point set) ---
+        start_feature = self.start_picker.feature()
+        if start_feature is not None and start_feature.isValid() and start_feature.id() in fids:
+            start_index = fids.index(start_feature.id())
+        else:
+            start_index = 0
+            if start_feature is not None and start_feature.isValid() and \
+                    start_feature.id() in skipped_fids:
+                _log("Chosen start point lies outside the boundary and was "
+                     "skipped; starting from the first in-boundary point instead.",
+                     Qgis.Warning)
+            elif self.selected_only.isChecked():
+                _log("Chosen start point is not in the selection; starting "
+                     "from the first selected point instead.", Qgis.Warning)
 
         # --- launch background task ---
         self._set_running(True)
@@ -293,6 +332,7 @@ class TSPRouteGeneratorDialog(QDialog):
             "fids": fids,
             "points": points,
             "closed": self.round_trip.isChecked(),
+            "skipped": len(skipped_fids),
         }
         task = PloverRouteTask(
             points, boundary_geom, buffer_dist, start_index,
@@ -344,9 +384,11 @@ class TSPRouteGeneratorDialog(QDialog):
 
         self.distance_output.setText(f"{result.total_length:,.1f} map units")
         trip = "round trip" if meta["closed"] else "one-way path"
+        skipped_note = (f" Skipped {meta['skipped']} point(s) outside the boundary."
+                        if meta.get("skipped") else "")
         self._set_status(
             f"Done — {len(result.order)} stops, {result.total_length:,.1f} units "
-            f"({trip}). Visibility graph: {result.node_count} nodes / "
+            f"({trip}).{skipped_note} Visibility graph: {result.node_count} nodes / "
             f"{result.edge_count} edges.")
         _log(f"Route created: {len(result.order)} stops, "
              f"{result.total_length:.2f} units, {trip}.")

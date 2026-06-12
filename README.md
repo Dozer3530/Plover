@@ -56,11 +56,12 @@ Also useful for:
 4. Optionally tick **Use only selected points**.
 5. Pick the **start point** with the feature picker.
 6. Set the **boundary buffer** (default 0.5 map units) — how far the route may stray outside the strict boundary or into exclusion zones.
-7. Untick **Return to start** if you want a one-way path instead of a round trip.
-8. Click **Run**. Progress is live and the run is cancellable.
-9. **Save Route…** exports to GeoPackage, Shapefile, GeoJSON, **GPX track** or **KML** (GPX/KML are auto-reprojected to WGS84 — load the GPX straight onto a handheld or phone).
+7. Choose what happens to **points outside the boundary**: *Fail if any point is outside* (the default — good when every point should be in-field) or *Skip points outside the boundary* (route only the points inside; handy when one big point layer spans many fields and you only want this field's points).
+8. Untick **Return to start** if you want a one-way path instead of a round trip.
+9. Click **Run**. Progress is live and the run is cancellable.
+10. **Save Route…** exports to GeoPackage, Shapefile, GeoJSON, **GPX track** or **KML** (GPX/KML are auto-reprojected to WGS84 — load the GPX straight onto a handheld or phone).
 
-If any points fall outside the buffered boundary, Plover refuses to run, selects the offending features on the layer, and logs their distances (**View → Panels → Log Messages → Plover**). Points unreachable from the start (cut off by a hole or a pinched boundary) are reported by number instead of being silently straight-lined.
+In **fail** mode, if any points fall outside the buffered boundary Plover refuses to run, selects the offending features on the layer, and logs their distances (**View → Panels → Log Messages → Plover**). In **skip** mode those points are dropped and only the in-boundary ones are routed (the count is reported). Points unreachable from the start (cut off by a hole or a pinched boundary) are reported by number instead of being silently straight-lined.
 
 ## Usage (Processing)
 
@@ -74,6 +75,7 @@ result = processing.run("plover:tsproute", {
     "BUFFER": 0.5,
     "START_INDEX": 0,
     "ROUND_TRIP": True,
+    "ON_OUTSIDE": 0,  # 0 = fail if any point is outside, 1 = skip outside points
     "OUTPUT_ROUTE": "memory:route",
     "OUTPUT_ORDER": "memory:visit_order",
 })
@@ -93,7 +95,7 @@ The advantage grows with point count and boundary complexity — and since v3.0.
 ## Known limitations
 
 - The solver is heuristic (multi-start NN + 2-opt + Or-opt), not exact. Tours are typically within a few percent of optimal but not provably optimal.
-- All points must lie within the buffered boundary; Plover reports offenders rather than guessing.
+- Points outside the buffered boundary are either reported (fail mode) or skipped (skip mode) — Plover never guesses a route to a point it can't legally reach.
 - Geographic CRS (EPSG:4326 etc.) is rejected — reproject to a projected CRS first.
 - The route follows straight visibility lines between graph vertices; it does not account for terrain, row direction, or machinery turning radii.
 

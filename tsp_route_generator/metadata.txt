@@ -4,7 +4,7 @@ qgisMinimumVersion=3.22
 qgisMaximumVersion=4.99
 supportsQt6=True
 description=Boundary-aware Traveling Salesperson routing: shortest tour through your points, around your sloughs.
-version=3.0.0
+version=3.1.0
 author=Zachary Komarnisky
 email=zkomarnisky@oldscollege.ca
 
@@ -15,7 +15,9 @@ repository=https://github.com/Dozer3530/Plover
 
 hasProcessingProvider=yes
 
-changelog=3.0.0
+changelog=3.1.0
+      - New "Points outside boundary" option: fail (require all points inside) or skip (route only the points inside the boundary) — route one field's points from a layer that spans many fields
+      3.0.0
       - Routing now runs in a background task: QGIS stays responsive, runs are cancellable
       - New Processing algorithm (Toolbox / Model Designer / batch): plover:tsproute
       - Buffer now genuinely allows edge-hugging paths; points on the field edge no longer become unreachable
