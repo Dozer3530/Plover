@@ -455,7 +455,7 @@ class TSPRouteGeneratorDialog(QDialog):
                 features.append(f)
             provider.addFeatures(features)
             order_layer.updateExtents()
-            self._label_order_layer(order_layer)
+            self._style_order_layer(order_layer)
             QgsProject.instance().addMapLayer(order_layer)
             self.order_layer = order_layer
 
@@ -484,18 +484,64 @@ class TSPRouteGeneratorDialog(QDialog):
             _log("Could not apply route symbology on this QGIS version; "
                  "using defaults.", Qgis.Warning)
 
-    def _label_order_layer(self, layer):
+    def _style_order_layer(self, layer):
+        """Numbered-waypoint badges: orange circles matching the route with a
+        bold white visit number centred on each. Best-effort across versions."""
+        # --- marker symbol: orange dot with a white ring (matches the route) ---
         try:
-            from qgis.core import QgsPalLayerSettings, QgsVectorLayerSimpleLabeling
+            from qgis.core import QgsMarkerSymbol
+            symbol = QgsMarkerSymbol.createSimple({
+                "name": "circle",
+                "color": "#e8590c",
+                "outline_color": "white",
+                "outline_width": "0.4",
+                "size": "4",
+            })
+            layer.renderer().setSymbol(symbol)
+        except Exception:  # noqa: BLE001 — cosmetic, never fatal
+            _log("Could not style visit-order markers on this QGIS version.",
+                 Qgis.Warning)
+
+        # --- labels: bold white number, centred over the marker, with a halo ---
+        try:
+            from qgis.core import (
+                QgsPalLayerSettings,
+                QgsTextBufferSettings,
+                QgsTextFormat,
+                QgsVectorLayerSimpleLabeling,
+            )
+            from qgis.PyQt.QtGui import QColor, QFont
+
+            text_format = QgsTextFormat()
+            font = QFont("Arial", 8)
+            font.setBold(True)
+            text_format.setFont(font)
+            text_format.setSize(8)
+            text_format.setColor(QColor("white"))
+
+            buffer = QgsTextBufferSettings()
+            buffer.setEnabled(True)
+            buffer.setSize(0.8)
+            buffer.setColor(QColor("#7a2e06"))  # dark orange halo for contrast
+            text_format.setBuffer(buffer)
+
             settings = QgsPalLayerSettings()
             settings.fieldName = "visit_order"
+            settings.setFormat(text_format)
+            # Centre the number on the marker so it reads as a badge.
+            try:
+                settings.placement = Qgis.LabelPlacement.OverPoint
+            except AttributeError:
+                settings.placement = QgsPalLayerSettings.OverPoint
+
             labeling = QgsVectorLayerSimpleLabeling(settings)
             layer.setLabeling(labeling)
             layer.setLabelsEnabled(True)
-            layer.triggerRepaint()
         except Exception:  # noqa: BLE001
             _log("Could not enable visit-order labels on this QGIS version.",
                  Qgis.Warning)
+
+        layer.triggerRepaint()
 
     # ---------------------------------------------------------------- save
 

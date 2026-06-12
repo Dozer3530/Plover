@@ -89,6 +89,9 @@ class DialogSmokeTests(unittest.TestCase):
         self.assertEqual(ranks, [1, 2, 3])
         fids = [f["source_fid"] for f in order_layer.getFeatures()]
         self.assertEqual(sorted(fids), [11, 22, 33])
+        # Visit-order layer is styled: numbered labels enabled on the field.
+        self.assertTrue(order_layer.labelsEnabled())
+        self.assertEqual(order_layer.labeling().settings().fieldName, "visit_order")
 
         names = {layer.name() for layer in
                  QgsProject.instance().mapLayers().values()}
