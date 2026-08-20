@@ -10,6 +10,14 @@ AI assistance was used to make this plugin possible.
 
 ---
 
+> ## 📘 Full User Guide
+>
+> A complete, illustrated 109-page guide covering installation, data preparation, every
+> dialog control, step-by-step workflows, exporting to GPS, automation and troubleshooting:
+>
+> - **[Read it on GitHub](docs/USER_GUIDE.md)**
+> - **[Download the editable Word version](docs/Plover-User-Guide.docx)**
+
 ## Install
 
 Grab the latest `plover-vX.Y.Z.zip` from the [Releases](https://github.com/Dozer3530/Plover/releases) page, then in QGIS:
@@ -51,7 +59,7 @@ Also useful for:
 ## Usage (dialog)
 
 1. Load a point layer. A polygon boundary layer is **optional** — add one to keep the route inside a field and around sloughs, or skip it for a plain straight-line route. Use a **projected CRS** (UTM, NAD83, …) — Plover refuses geographic CRS and auto-reprojects the points to the working CRS if they differ.
-2. Open Plover from the **Plugins** menu or the toolbar icon.
+2. Open Plover from **Vector → Plover → Plover — Generate TSP Route**, or the toolbar icon.
 3. Pick the point layer, and a boundary layer if you want one (leave **Boundary layer** empty for no boundary — the dropdowns track your project automatically).
 4. Optionally tick **Use only selected points**.
 5. Pick the **start point** with the feature picker.
@@ -108,6 +116,7 @@ Piping Plovers are small, endangered shorebirds that nest on Alberta's prairie s
 ```
 Plover/
   assets/                            # logo
+  docs/                              # user guide (Markdown + Word) and its generators
   tsp_route_generator/               # QGIS plugin folder (name fixed for plugin identity)
     __init__.py                      # classFactory entry point
     metadata.txt
